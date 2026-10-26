@@ -4,6 +4,8 @@
 
 A hobby design for a card-authorization ledger pipeline that sustains 200,000 transactions per second (TPS), stays correct under crash-stop failures, and is proven correct mainly by deterministic simulation and fault injection. It serves as the starting functional spec, non-functional spec and design for an implementation in Scala 3 with Cats Effect.
 
+**Also in this repo:** [DESIGN-LOG.md](DESIGN-LOG.md) records every decision that was corrected and how the flaw was found; [ROADMAP.md](ROADMAP.md) lists the phases beyond the core.
+
 **Status markers used throughout:** *verified* = checked against the cited source; *estimate* = rough reasoning, to measure; *recollection* or *verify* = believed true, not yet checked.
 
 ---
@@ -323,3 +325,5 @@ Each stage checks the assumptions the next one builds on: the simulator encodes 
 - **Modules mirror the stages:** `core` (no dependencies), `sim`, `checker`, `shell`, `contract-tests`, `loadgen`. The compiler keeps the core free of effects.
 - **A simulator that never fails proves nothing.** Stage 3 includes planted bugs, such as expiring by the clock without a fence, or a cancel that voids without fencing, and the simulator must catch them.
 - **Stages 2 to 4 are the heart of the project.** A walking skeleton on real binaries before stage 5 would mostly repeat stage 0.
+
+Beyond stage 8, [ROADMAP.md](ROADMAP.md) covers the card lifecycle, sharding, formal verification, multiple currencies, accounting views, risk checks, operations and a reusable simulation library.
