@@ -14,7 +14,7 @@ A hobby design for a card-authorization ledger pipeline that sustains 200,000 tr
 - **Setting:** a hypothetical core-banking platform serving a large bank. Clients may be async-capable or may insist on a synchronous call.
 - **Rate:** 200k TPS as an average over a 1-minute window, with 300k TPS as the stress scenario. Sub-second bursts of 2 to 3 times that are absorbed by queues (*estimate*).
 - **Deadline:** the ledger answers within **1.5 s**, inside the bank's 2 to 3 s card-network budget. A "timed out" answer is acceptable and does not count toward SLA penalties.
-- **Correctness bar:** no double debit, no lost result, a deterministic outcome for every request, and an explicit "timed out" reply that means no money stays held, even when any process crashes at any point. (A caller that loses its connection because the edge crashed gets no such guarantee; see section 12.)
+- **Correctness bar:** no double debit, no lost result, a deterministic outcome for every request, and safe cancellation of any request the caller got no definitive answer for, so that a "timed out" reply never leaves money held, even when any process crashes at any point.
 - **Building blocks:** Kafka (logs), TigerBeetle (ledger and money invariants), Postgres (queryable projection, off the hot path).
 
 ## 2. Design philosophy
@@ -24,7 +24,7 @@ Each stage does one clear thing against one clear store, commits its progress, a
 1. **One stage, one job, one store.** A failure or overload in one kind of operation does not swamp the others.
 2. **Log intent before effect.** Every command is durable in Kafka before it touches the ledger, so every effect can be found and reconciled.
 3. **Batch everywhere, idempotent per item.** Throughput comes from batches; safety comes from each item carrying its own idempotency ID.
-4. **Nothing random on the path to an effect.** Every ID that reaches TigerBeetle is re-derivable from the request itself.
+4. **Nothing random on the path to an effect.** Every ID that reaches TigerBeetle is re-derivable from the request itself, and every decision a replay could make differently, such as expiry by the clock, is written to the ledger instead (section 8).
 5. **Recovery is the normal path.** Replay after a crash runs the same code as normal processing.
 6. **Keep headroom.** A store at its limit has no room for bursts, failover or a lagging consumer.
 7. **Count the couplings.** Three systems at 99.99% each give about 99.97% combined; removing a system beats tuning one.
@@ -48,8 +48,8 @@ Requests flow through Kafka topics and a single processing stage, the batcher; P
 flowchart TD
     Bank["Bank / card network"] <-->|"sync call, 1.5 s deadline"| Edge
     Edge["Edge adapter<br/>hash client key → TigerBeetle ID<br/>waiter table, admission control"]
-    Edge -->|"authorization or void,<br/>keyed by authorization ID"| Sub[("submission topic")]
-    Sub --> Batcher["Batcher<br/>poll, expire late authorizations,<br/>batch up to ~8k"]
+    Edge -->|"authorization or cancel,<br/>keyed by authorization ID"| Sub[("submission topic")]
+    Sub --> Batcher["Batcher<br/>poll, fence late authorizations,<br/>batch up to ~8k"]
     Batcher <-->|"one batch call"| TB[["TigerBeetle<br/>balances, holds, timeouts<br/>idempotent on ok and failure"]]
     Batcher --> Res[("results topic<br/>full outcome")]
     Batcher --> Rep[("replies topic<br/>slim outcome")]
@@ -58,25 +58,25 @@ flowchart TD
     Res --> Other["Other consumers<br/>fraud, notifications, audit"]
 ```
 
-- **Edge adapter:** accepts the call, derives the TigerBeetle ID by hashing the client key (section 7), registers a waiter, and writes the command to the submission topic.
-- **Submission topic:** keyed by the authorization's transfer ID, so an authorization and its later void land on the same partition, in order.
-- **Batcher:** polls a chunk, resolves authorizations past their core deadline as `expired` without calling TigerBeetle, submits the rest to TigerBeetle as one batch, then writes results, slim replies and the consumed offsets in one Kafka transaction. Voids are never expired: they are always submitted, however late.
+- **Edge adapter:** accepts an authorization or a `cancel(clientKey)`, derives the TigerBeetle ID by hashing the client key (section 7), registers a waiter, and writes the command to the submission topic.
+- **Submission topic:** keyed by the authorization's transfer ID, so every command about one hold lands on the same partition.
+- **Batcher:** polls a chunk, fences authorizations past their core deadline instead of submitting them (section 8), submits everything to TigerBeetle as one batch, then writes results, slim replies and the consumed offsets in one Kafka transaction. Cancels are never expired: they are always submitted, however late.
 - **Replies topic:** broadcast to every edge instance; each completes only its own waiters (section 9).
 
 **Three keys, three jobs.** Idempotency is per command; routing is per hold.
 
-| Key | Identifies | Authorization | Void |
+| Key | Identifies | Authorization | Cancel |
 | --- | --- | --- | --- |
-| Client idempotency key | The client's request | `clientKey` | None; the edge creates the void |
-| TigerBeetle transfer ID | One ledger command; TigerBeetle deduplicates on it | `A = hash(clientId, clientKey)` | `V = hash(A, "void")` |
-| Kafka record key | The hold the command concerns; only picks the partition | `A` | `A`, taken from the void's `pending_id` |
+| Client idempotency key | The client's request | `clientKey` | The same `clientKey` |
+| TigerBeetle transfer ID | One ledger command; TigerBeetle deduplicates on it | `A = hash(clientId, clientKey)` | Fence `A` (same ID, fence code) and void `V = hash(A, "void")` |
+| Kafka record key | The hold the command concerns; only picks the partition | `A` | `A` |
 
-Every later command about a hold (void, capture, reversal) carries `A` as its `pending_id`, so the partitioner routes on `A` for an authorization and on `pending_id` for everything else. Kafka does not deduplicate on the record key, so two records sharing it are simply two records on one partition, in order. Keying by account would order every operation on an account for no benefit, since TigerBeetle already enforces balances, and would turn busy accounts into hot partitions.
+Every later command about a hold (cancel, capture, reversal) carries `A` as its `pending_id`, so the partitioner routes on `A` for an authorization and on `pending_id` for everything else. Kafka does not deduplicate on the record key, so two records sharing it are simply two records on one partition, in order. Keying by account would order every operation on an account for no benefit, since TigerBeetle already enforces balances, and would turn busy accounts into hot partitions.
 
 **Submission topic rules** that follow from sharing the key:
 
-- **`cleanup.policy=delete`, never `compact`.** Compaction keeps only the latest record per key, so a void would erase its own authorization from the log.
-- **Partition count fixed for the topic's life.** The default partitioner maps a key to `hash(key) mod N`; changing N would split an authorization and its void across partitions. Resizing means a new topic and draining the old one, so choose N with headroom.
+- **`cleanup.policy=delete`, never `compact`.** Compaction keeps only the latest record per key, so a cancel would erase its authorization from the intent log, breaking principle 2.
+- **Partition count fixed for the topic's life.** The default partitioner maps a key to `hash(key) mod N`; changing N scatters one hold's commands across partitions. Fenced cancels (section 8) keep that correct, but it defeats per-hold locality. Resizing means a new topic and draining the old one, so choose N with headroom.
 
 ## 5. Correctness under crash-stop
 
@@ -85,17 +85,20 @@ Every crash point resolves to a replay that produces the same outcome.
 | Crash point | What happens on replay | Rule that makes it safe |
 | --- | --- | --- |
 | Edge crashes before the command is in Kafka | Nothing happened; the caller sees a timeout | Nothing is executed until it is durable in the log |
-| Edge crashes after writing to Kafka | The command is processed; nobody is waiting for the reply | Results are durable; the bank reconciles via the network's advices |
+| Edge crashes after writing to Kafka | The command is processed; the caller sees a connection error and sends `cancel(clientKey)` | The caller's cancel contract and fenced cancels (section 8) |
 | Batcher crashes before calling TigerBeetle | The chunk is re-polled and submitted | Offsets are committed in the same transaction as the results |
 | Batcher crashes after TigerBeetle, before writing results | Resubmission returns `exists` for successes and `id_already_failed` for transient failures | TigerBeetle idempotency covers both successes and rejections (*verified*, since 0.16.4) |
+| Same, but the replay happens after the core deadline | The fence for `A` returns `exists_with_different_*`; the batcher looks `A` up and reports the real outcome | Expiry is a ledger write, not a clock reading (section 8) |
+| A cancel overtakes its authorization, for example a stale send from a crashed edge | The fence creates `A`; the late authorization gets `exists_with_different_*` and is reported `cancelled` | The authorization ID doubles as a fencing token (section 8) |
 | The same client key arrives twice | The same hashed ID returns the original outcome | ID derived deterministically from the client key |
 | A hold is abandoned | TigerBeetle voids it after its timeout and returns the funds | Every authorization is a pending transfer with a timeout |
-| A reply is lost on the way to the client | It is a timeout from the caller's view; the ledger stays consistent | Deadlines plus the compensating void (section 8) |
+| A reply is lost on the way to the client | It is a timeout from the caller's view, so the caller cancels | The caller's cancel contract (section 8) |
 
 **Consequences to design for:**
 
 - On replay, the batcher learns *that* a transient rejection happened, but not necessarily the original reason (for example insufficient funds versus account not found). Persist the reason in the result before committing, or accept a generic reason on the rare replay path.
 - `exists` must be treated exactly like `ok`, with the original result rebuilt by looking the transfer up.
+- `exists_with_different_*` on an authorization means either a fence or a reused client key with a different payload. The batcher looks `A` up and checks its `code` to tell them apart.
 
 ## 6. Facts: verified versus assumed
 
@@ -107,6 +110,9 @@ Every crash point resolves to a replay that produces the same outcome.
 | `pending_transfer_not_found` is one of those transient errors | Verified | [create_transfers](https://docs.tigerbeetle.com/reference/requests/create_transfers/) |
 | `pending_transfer_expired` is not transient | Verified | [create_transfers](https://docs.tigerbeetle.com/reference/requests/create_transfers/) |
 | Events in one batch are applied in order, and a post or void may reference a pending transfer created earlier in the same batch | Recollection, verify | Not stated on the create_transfers page |
+| Reusing an existing transfer ID with different fields returns `exists_with_different_*`, never `exists` | Recollection, verify | [create_transfers](https://docs.tigerbeetle.com/reference/requests/create_transfers/) |
+| A transfer between two dedicated fence accounts can be created with no balance effect (zero or token amount) | Recollection, verify | — |
+| Voiding a transfer that is not pending returns `pending_transfer_not_pending` | Recollection, verify | [create_transfers](https://docs.tigerbeetle.com/reference/requests/create_transfers/) |
 | `exists` should be handled exactly like `ok` for crash recovery | Verified | [create_transfers](https://docs.tigerbeetle.com/reference/requests/create_transfers/) |
 | Batches of about 8,190 transfers; single core, single leader | Verified | [Performance](https://docs.tigerbeetle.com/concepts/performance/) |
 | Random IDs give about 10% lower throughput than strictly increasing IDs | Verified | [Data modeling](https://docs.tigerbeetle.com/design/data-modeling/) |
@@ -114,6 +120,7 @@ Every crash point resolves to a replay that produces the same outcome.
 | Expiry voids may land a second or two after the timeout | Practitioner report | [Aivars Kalvāns](https://dev.to/aivarsk/running-tigerbeetle-without-a-control-plane-database-part-two-3c0p) |
 | Card networks do not resend an authorization within a round; they apply stand-in and send an advice | Recollection, verify | Scheme specifications |
 | Card-network authorization is synchronous on the hot path | Recollection, verify | Scheme specifications |
+| An acquirer that gets no issuer answer sends a reversal for that authorization | Recollection, verify | ISO 8583 and scheme specifications |
 
 ## 7. ID strategy
 
@@ -123,47 +130,63 @@ The mapping from a client key to a TigerBeetle ID sits behind one interface, so 
 - **Cost:** about 10% lower TigerBeetle throughput than strictly increasing IDs (*verified*). The likely mechanism (*inferred*): random keys make LSM files overlap, so compaction rewrites more and existence checks probe more levels.
 - **Contract:** TigerBeetle remembers IDs forever, so client keys must be unique per client for all time. Do not scope the hash by calendar date, or a retry crossing midnight becomes a new transfer.
 - **Retry contract:** once an ID fails with a transient error or is voided, it can never succeed again. (Validation errors are not recorded, so an ID rejected for those could succeed if resent with corrected fields; with hashed IDs and unchanged fields this does not arise.) A client retrying after a timeout either reuses the key and gets the original outcome, or uses a new key for a genuinely new attempt.
-- **Void IDs:** each void gets its own fixed ID, the hash of the original transfer ID plus a "void" tag, so voids are idempotent too.
+- **Cancel IDs:** a cancel's fence reuses `A` itself, and its void gets the fixed ID `V = hash(A, "void")`, so cancels are idempotent too.
 - **Winning back the ~10%:** switch to time-ordered IDs behind the same interface. Either clients supply ULIDs or TigerBeetle-style time-based IDs, or a mapping layer assigns one on first sight of each client key (a Kafka Streams stage with a state store, or DynamoDB with conditional puts). The mapping layer brings back a state store, restore time after failover, and roughly 1 to 2 TB of dedupe state per day at 200k TPS (*estimate*), which is why it is not the default.
 - **Rejected:** IDs derived from Kafka partition and offset. They would need the offset of the key's first occurrence, which requires a state store anyway.
 
-## 8. Deadlines, voids and failover
+## 8. Deadlines, cancels and failover
 
-A "timed out" answer must mean that no hold survives.
+A "timed out" answer must mean that no hold survives, and any request without a definitive answer must be safely cancellable.
 
 **Deadlines**
 
 - **No retries within a round** (*recollection, verify*): on an issuer timeout, the networks apply stand-in rules and later send an advice. The follow-up is a reversal, not a resend; merchant retries are usually new authorizations with new identifiers. So the timeout answer is final for that round.
-- **Two deadlines:** each command carries a core deadline of about 1.2 s, stamped as absolute time at the edge. The batcher resolves authorizations past it as `expired` instead of calling TigerBeetle; voids are exempt. The edge deadline stays at 1.5 s; the gap covers post-TigerBeetle propagation.
+- **Two deadlines:** each command carries a core deadline of about 1.2 s, stamped as absolute time at the edge. The batcher fences authorizations past it instead of submitting them (replay-safe expiry, below); cancels are exempt. The edge deadline stays at 1.5 s; the gap covers post-TigerBeetle propagation.
 - **Clocks:** the core deadline is stamped on one machine and checked on another. Normal clock synchronization keeps drift to milliseconds; this assumption is part of the design.
 - **Normal-case budget** (*estimate*): about 150 to 400 ms, dominated by the batcher's transaction cadence and the edge's read-committed consumption of replies; under 100 ms when tuned. The risk is tail events, not the average.
 
-**The compensating void**
+**Cancels: fence, then void**
 
-When the edge times out, it writes a void command for that transfer ID. Three rules make the void safe:
+A cancel either releases what an authorization did or stops it from ever happening, whichever order they reach TigerBeetle in. It is one TigerBeetle batch of two unlinked events:
 
-1. **Same partition, same order.** The void goes to the submission topic with the same record key as the authorization (`A`), through the same idempotent producer, so the log delivers it after the authorization. The edge writes the void only once the authorization's send has completed, with an ack or an error, never while it is still in flight. The timeout reply to the caller does not wait for this; only the void does. Until in-batch ordering is verified (section 6), the batcher never puts a void in the same TigerBeetle batch as its authorization. A void can never overtake the transfer it cancels.
-2. **Fixed void ID.** The void's own ID is the hash of the transfer ID plus a "void" tag, so a replayed void is idempotent.
-3. **Benign failure.** If the authorization was resolved as expired, the void returns `pending_transfer_not_found`: nothing was ever held. Because this is a transient error, the void ID is then permanently failed, which is exactly what we want. If the hold already timed out, the void returns `pending_transfer_expired`, which is equally benign.
+1. **Fence:** a transfer with ID `A` itself and a dedicated fence `code`, between two fence accounts, with no balance effect.
+2. **Void:** ID `V = hash(A, "void")`, with `pending_id = A`.
 
-Rule 1 is essential. A void sent out of band could reach TigerBeetle before the pending transfer, fail, and burn its ID, leaving the hold alive until its own timeout. **Anything that bypasses the per-key partition order, such as hedged submission through a second consumer group, breaks this guarantee.**
+| What reaches TigerBeetle first | Fence | Void | Late authorization |
+| --- | --- | --- | --- |
+| The authorization | `exists_with_different_*` | Releases the hold, or `pending_transfer_expired` if it already timed out | None |
+| The cancel | Created | Fails harmlessly with `pending_transfer_not_pending` | `exists_with_different_*`; the batcher sees the fence code and reports `cancelled` |
 
-The pending transfer's own timeout remains the last backstop if a void is lost entirely.
+A replayed cancel is idempotent: the fence returns `exists` and the void repeats its earlier result. No rule about partitions, producers or batch boundaries is needed for correctness, so a stale authorization from a crashed edge cannot bring a cancelled hold back.
+
+**Who cancels**
+
+1. **The caller (the guarantee).** Any non-definitive result, whether a "timed out" reply, a connection error or no answer, obliges the caller to send `cancel(clientKey)`, retried until acknowledged. This mirrors the acquirer's timeout reversal in card payments (*recollection, verify*). The caller is the bank's own authorization system, so the contract is enforceable.
+2. **The edge (an optimization).** On its 1.5 s timeout the edge replies "timed out" at once and writes the cancel itself, keeping holds short even when the caller is slow.
+3. **Backstops.** Network reversals (section 12, gap 3) and the pending transfer's own timeout. That timeout cannot be short, since a real hold must last until capture.
+
+**Why not a ledger-side sweeper:** the ledger cannot tell "the caller never got an answer" from "the reply was written but lost". A sweeper would sometimes void a hold the caller believes approved, which is worse than an orphaned hold.
+
+**Stand-in exception:** if the bank approved on the ledger's behalf, the caller must not cancel. It needs a forced hold instead (section 12, gap 3).
+
+**Replay-safe expiry**
+
+Expiry by clock reading is not replay-safe. A batcher that submits `A` at 1.1 s, crashes before committing, and replays at 1.3 s would report `expired` while TigerBeetle holds the funds; the edge would then tell the caller "declined" and send no cancel. So expiring an authorization means writing its fence. If the fence returns `exists_with_different_*`, the authorization had already gone through, and the batcher reports its real outcome. The cost is one TigerBeetle event per expired request. Expiries are rare, and under overload Kafka and the batcher saturate before TigerBeetle.
 
 **Failover**
 
 - **Batcher state is small:** with hashed IDs the batcher keeps no dedupe store, so failover means reassigning partitions and resuming from committed offsets. There is no state to restore.
-- **Remaining gap is failure detection,** typically seconds, governed by the session timeout. Partitions owned by a dead instance stall; their requests time out and are voided.
+- **Remaining gap is failure detection,** typically seconds, governed by the session timeout. Partitions owned by a dead instance stall; their requests time out and are cancelled.
 - **Why not 1 s detection:** pauses and network blips cause false evictions and rebalance storms; detection is only part of the outage; brokers enforce minimum session timeouts; heartbeat traffic grows. Correctness would survive anyway, thanks to transactional fencing and TigerBeetle idempotency.
 - **Partition count is a blast-radius setting:** more partitions per instance means each failure touches a smaller slice of traffic.
-- **Deferred: hedged submission.** A second consumer group submitting requests still unanswered after about 300 ms would remove the failover stall, but it breaks per-key ordering for voids (above) and can double TigerBeetle load. Revisit only with a design that keeps voids ordered.
+- **Deferred: hedged submission.** A second consumer group submitting requests still unanswered after about 300 ms would remove the failover stall. Fenced cancels make it safe, but it can double TigerBeetle load.
 
 ## 9. Reply routing
 
 Start with broadcast over a slim replies topic; switch to reply addressing only if the edge fleet grows past about 50 instances.
 
 - **The problem:** the authorization ID decides where work is processed, but the load balancer decides which edge instance holds the TCP or QUIC connection. The result must cross from one mapping to the other.
-- **Best-effort by design:** results are durable, and deadlines plus voids keep the ledger consistent. A lost reply is a timeout, not a correctness failure.
+- **Best-effort by design:** results are durable, and deadlines plus cancels keep the ledger consistent. A lost reply is a timeout, not a correctness failure.
 - **Edge waiter table:** an in-memory map from request ID to waiting connection, each entry expiring at the deadline. The whole fleet holds at most about 300k entries at 200k TPS and 1.5 s.
 - **Chosen: broadcast.** Every edge instance reads the slim replies topic (request ID, outcome code, amount) and completes only its own waiters. The request ID sits in the record key or a header, so non-matching records are skipped without parsing.
 - **Cost model:** broker egress = N instances × 200k/s × message size. At about 50 B per reply, that is about 10 MB/s per instance and about 1 GB/s for 100 instances. The lookup costs tens of nanoseconds; consumer work is an estimated fraction of a core per instance.
@@ -198,17 +221,17 @@ Testing is the centerpiece of the project: every invariant is checked by determi
 
 - No transfer is applied twice.
 - Every request reaches exactly one terminal outcome.
-- Once the edge has replied "timed out" and the batcher has processed its partition up to that request's void, no hold for that request survives.
+- Once a cancel for a request has been processed, no hold for that request survives, and no later authorization with its ID can create one.
 - Whenever the edge replied with an outcome, it matches the ledger.
 - Balances never break their configured limits.
 - Under overload, useful throughput stays above a floor instead of collapsing to zero.
 
 **Core as pure state machines.** No JVM effect runtime is fully plug-and-play for DST: Kyo lacks a deterministic scheduler, and Cats Effect TestControl breaks on outside threads. So the money logic is a functional core with an imperative shell, as FoundationDB and TigerBeetle do.
 
-- **Functional core:** each component (edge waiter and admission logic, batcher, deadline and void rules) is a function from state plus event to new state plus commands. Events include request arrived, batch result returned, time advanced, consumer rebalanced.
+- **Functional core:** each component (edge waiter and admission logic, batcher, deadline, fence and cancel rules) is a function from state plus event to new state plus commands. Events include request arrived, batch result returned, time advanced, consumer rebalanced.
 - **Two interpreters for the commands:** the Cats Effect shell performs them for real; the simulator performs them in a deterministic event loop.
 - **Simulator:** a plain loop over a priority queue of events ordered by simulated time, with a seeded random generator choosing delays, reorderings and crashes. No fibers involved.
-- **Simulated adapters model real semantics,** not canned mock answers: offsets, commits, redelivery and rebalances for Kafka; `exists`, `id_already_failed`, `pending_transfer_not_found`, balance limits and pending timeouts on the simulated clock for TigerBeetle.
+- **Simulated adapters model real semantics,** not canned mock answers: offsets, commits, redelivery and rebalances for Kafka; `exists`, `id_already_failed`, `exists_with_different_*`, `pending_transfer_not_pending`, balance limits and pending timeouts on the simulated clock for TigerBeetle.
 - **Reference design worth studying:** Haskell's [io-sim](https://hackage.haskell.org/package/io-sim), which runs the same code under real IO or a simulator with schedule exploration.
 
 **Fault tools compared:**
@@ -224,18 +247,15 @@ Testing is the centerpiece of the project: every invariant is checked by determi
 
 These are open in the functional and non-functional spec.
 
-1. **Overload and admission control.** With hard deadlines, a backlog makes every queued request expire, and useful throughput drops toward zero while the system looks busy. The edge must decline fast once lag or the in-flight count crosses a threshold; the batcher's cheap expiry of late authorizations is the second line of defense.
+1. **Overload and admission control.** With hard deadlines, a backlog makes every queued request expire, and useful throughput drops toward zero while the system looks busy. The edge must decline fast once lag or the in-flight count crosses a threshold; the batcher's cheap fencing of late authorizations is the second line of defense.
 2. **What an authorization checks.** TigerBeetle enforces balances. Card status, limits, currency and blocked accounts are unspecified, as is whether they run before TigerBeetle or are encoded as TigerBeetle accounts and limits.
 3. **The rest of the card lifecycle.** Capture (including partial captures), incremental authorizations, reversals, and stand-in advices that force a post or void after the fact. Network reversals and advices arrive with network identifiers, not `A`, so they need a lookup from network identifiers to `A` (served by the results topic or the Postgres projection) before they can be routed.
 4. **Silent TigerBeetle events.** Auto-expired holds produce no Kafka record. Downstream views need TigerBeetle change data capture or a periodic scan by timestamp (*verify current CDC options*).
-5. **Observability.** Per-stage latency, consumer lag, timeout rate and void rate from day one.
+5. **Observability.** Per-stage latency, consumer lag, timeout rate and cancel rate from day one.
 
 **Follow-ups from review** (need discussion or deeper analysis):
 
-6. **Orphaned holds after an edge crash.** If the edge crashes after writing an authorization, the caller sees a dropped connection, and the hold stays until a network reversal advice or its own timeout. Decide whether that is acceptable, or whether something else must void requests whose edge died (for example a sweeper keyed on edge instance liveness).
-7. **A failed send landing late.** Rule 1 writes the void only after the authorization's send completes. A failed idempotent send is ambiguous: the record may or may not be in the log. Verify that once the producer reports the failure, no stale request for it can still be appended after a later send, including when the producer is recreated.
-8. **Same client key, different payload.** A retry that reuses a key with a different amount or account gets TigerBeetle's `exists_with_different_*` errors rather than the original outcome. Define the client-facing response and whether the edge should catch it earlier.
-9. **Batch splitting cost.** Keeping a void out of its authorization's batch (rule 1) is cheap in the normal case, but measure it under bursts where many voids follow their authorizations closely. Moot if stage 0 confirms in-batch ordering.
+6. **Same client key, different payload.** A retry that reuses a key with a different amount or account gets TigerBeetle's `exists_with_different_*` errors rather than the original outcome. Define the client-facing response and whether the edge should catch it earlier. The batcher already tells this case apart from a fence by `code`.
 
 ## 13. Alternatives considered
 
@@ -248,7 +268,9 @@ These are open in the functional and non-functional spec.
 | Redis as idempotency map | Weaker durability for a correctness-critical mapping |
 | Postgres LISTEN/NOTIFY to wake waiting requests | NOTIFY adds commit contention at high throughput |
 | Reply addressing (per-instance partitions or direct RPC) | Not needed below about 50 edge instances; kept as the upgrade path from broadcast |
-| Hedged submission via a second consumer group | Breaks per-key ordering for voids; deferred |
+| Hedged submission via a second consumer group | Safe with fenced cancels, but can double TigerBeetle load; deferred |
+| Ordered voids instead of fenced cancels (same partition, same producer, void after the authorization's send completes) | Breaks when a crashed edge's stale send lands after a cancel from another instance |
+| Ledger-side sweeper for unanswered requests | Cannot tell a lost reply from a delivered one; would void holds the caller believes approved |
 | Kyo instead of Cats Effect for the shell | No native Kafka client; fs2 bridging means two runtimes |
 
 Below about 20k TPS, the simple sync path plus a sweeper is less machinery and probably the better choice.
@@ -259,9 +281,9 @@ Each stage checks the assumptions the next one builds on: the simulator encodes 
 
 | Stage | Goal | Done when |
 | --- | --- | --- |
-| 0. Fact spike | Throwaway scripts against single-node TigerBeetle and local Kafka: in-batch ordering, same-batch `pending_id`, error codes, pending timeouts, whether a failed idempotent send can land after a later one | Every TigerBeetle and Kafka fact in section 6 is verified or refuted |
-| 1. Spec as code | Domain types (commands, outcomes, rejection reasons, routing key) and the invariants of section 11 as predicates over an event history; scope is authorization and void only | Invariants compile and fail on hand-written bad histories |
-| 2. Pure core | State machines for the batcher, edge waiter and admission control, deadlines and voids; no effects | Property tests pass per machine |
+| 0. Fact spike | Throwaway scripts against single-node TigerBeetle and local Kafka: a fence transfer with no balance effect, error codes (`exists_with_different_*`, `pending_transfer_not_pending`, transient and expired results), pending timeouts | Every TigerBeetle and Kafka fact in section 6 is verified or refuted |
+| 1. Spec as code | Domain types (commands, outcomes, rejection reasons, routing key) and the invariants of section 11 as predicates over an event history; scope is authorization and cancel only | Invariants compile and fail on hand-written bad histories |
+| 2. Pure core | State machines for the batcher, edge waiter and admission control, fenced cancels and replay-safe expiry; no effects | Property tests pass per machine |
 | 3. Deterministic simulator | Seeded event loop with simulated Kafka and TigerBeetle that behave as stage 0 found | Millions of seeds pass, failures replay by seed, and planted bugs are caught |
 | 4. Contract tests | One suite run against both the simulators and the real binaries | Green on both in CI |
 | 5. Cats Effect shell | fs2-kafka, the TigerBeetle client wrapped in `IO`, the http4s edge; TestControl shell tests | End to end on a laptop at low rate, surviving manual kills of any process |
@@ -271,5 +293,5 @@ Each stage checks the assumptions the next one builds on: the simulator encodes 
 
 - **One set of invariants for every stage.** They are defined once in stage 1 and checked by the simulator, the contract tests, the offline checker and the chaos runs.
 - **Modules mirror the stages:** `core` (no dependencies), `sim`, `checker`, `shell`, `contract-tests`, `loadgen`. The compiler keeps the core free of effects.
-- **A simulator that never fails proves nothing.** Stage 3 includes planted bugs, such as expiring a void or letting a void overtake its authorization, and the simulator must catch them.
+- **A simulator that never fails proves nothing.** Stage 3 includes planted bugs, such as expiring by the clock without a fence, or a cancel that voids without fencing, and the simulator must catch them.
 - **Stages 2 to 4 are the heart of the project.** A walking skeleton on real binaries before stage 5 would mostly repeat stage 0.
