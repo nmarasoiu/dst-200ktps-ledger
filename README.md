@@ -14,7 +14,7 @@ A hobby design for a card-authorization ledger pipeline that sustains 200,000 tr
 - **Setting:** a hypothetical core-banking platform serving a large bank. Clients may be async-capable or may insist on a synchronous call.
 - **Rate:** 200k TPS as an average over a 1-minute window, with 300k TPS as the stress scenario. Sub-second bursts of 2 to 3 times that are absorbed by queues (*estimate*).
 - **Deadline:** the ledger answers within **1.5 s**, inside the bank's 2 to 3 s card-network budget. A "timed out" answer is acceptable and does not count toward SLA penalties.
-- **Correctness bar:** no double debit, no lost result, a deterministic outcome for every request, and a "timed out" answer that means no money stays held, even when any process crashes at any point.
+- **Correctness bar:** no double debit, no lost result, a deterministic outcome for every request, and an explicit "timed out" reply that means no money stays held, even when any process crashes at any point. (A caller that loses its connection because the edge crashed gets no such guarantee; see section 12.)
 - **Building blocks:** Kafka (logs), TigerBeetle (ledger and money invariants), Postgres (queryable projection, off the hot path).
 
 ## 2. Design philosophy
@@ -35,7 +35,7 @@ Each stage does one clear thing against one clear store, commits its progress, a
 The throughput target alone forces Postgres off the hot path and makes batching mandatory.
 
 1. At 200k to 300k TPS, one-by-one processing is impossible at every stage, so **batching is mandatory**.
-2. **TigerBeetle is not the bottleneck.** It processes batches of up to about 8,190 transfers, runs single-core with a single leader by design, and advertises roughly 100k to 500k TPS on one cluster (*verified*, [Performance](https://docs.tigerbeetle.com/concepts/performance/)). At 200k TPS it runs nearer its ceiling than its makers recommend.
+2. **TigerBeetle is not the bottleneck.** It processes batches of up to about 8,190 transfers, runs single-core with a single leader by design, ([Performance](https://docs.tigerbeetle.com/concepts/performance/)), and is believed to sustain roughly 100k to 500k TPS on one cluster (*recollection, verify*: the Performance page gives no TPS figure). At 200k TPS it runs nearer its ceiling than its makers recommend.
 3. **A single Postgres writer** doing several writes per transaction is very likely over its comfortable limit (*estimate*).
 4. If Postgres stayed on the hot path, CDC from its WAL would be the cheapest way out. But at the limit, CDC is fragile: a lagging consumer forces WAL retention, which can fill disk and stall the database.
 5. **Conclusion:** demote Postgres to an async projection. Kafka is the durable intent log; TigerBeetle is the durable outcome and invariant enforcer.
@@ -49,7 +49,7 @@ flowchart TD
     Bank["Bank / card network"] <-->|"sync call, 1.5 s deadline"| Edge
     Edge["Edge adapter<br/>hash client key → TigerBeetle ID<br/>waiter table, admission control"]
     Edge -->|"authorization or void,<br/>keyed by client key"| Sub[("submission topic")]
-    Sub --> Batcher["Batcher<br/>poll, drop expired,<br/>batch up to ~8k"]
+    Sub --> Batcher["Batcher<br/>poll, expire late authorizations,<br/>batch up to ~8k"]
     Batcher <-->|"one batch call"| TB[["TigerBeetle<br/>balances, holds, timeouts<br/>idempotent on ok and failure"]]
     Batcher --> Res[("results topic<br/>full outcome")]
     Batcher --> Rep[("replies topic<br/>slim outcome")]
@@ -60,7 +60,7 @@ flowchart TD
 
 - **Edge adapter:** accepts the call, derives the TigerBeetle ID by hashing the client key (section 7), registers a waiter, and writes the command to the submission topic.
 - **Submission topic:** keyed by client key, so an authorization and its later void land on the same partition, in order.
-- **Batcher:** polls a chunk, drops commands past their core deadline, submits the rest to TigerBeetle as one batch, writes results and slim replies in one Kafka transaction, then commits offsets.
+- **Batcher:** polls a chunk, resolves authorizations past their core deadline as `expired` without calling TigerBeetle, submits the rest to TigerBeetle as one batch, then writes results, slim replies and the consumed offsets in one Kafka transaction. Voids are never expired: they are always submitted, however late.
 - **Replies topic:** broadcast to every edge instance; each completes only its own waiters (section 9).
 
 ## 5. Correctness under crash-stop
@@ -71,7 +71,7 @@ Every crash point resolves to a replay that produces the same outcome.
 | --- | --- | --- |
 | Edge crashes before the command is in Kafka | Nothing happened; the caller sees a timeout | Nothing is executed until it is durable in the log |
 | Edge crashes after writing to Kafka | The command is processed; nobody is waiting for the reply | Results are durable; the bank reconciles via the network's advices |
-| Batcher crashes before calling TigerBeetle | The chunk is re-polled and submitted | Offsets are committed only after results are written |
+| Batcher crashes before calling TigerBeetle | The chunk is re-polled and submitted | Offsets are committed in the same transaction as the results |
 | Batcher crashes after TigerBeetle, before writing results | Resubmission returns `exists` for successes and `id_already_failed` for transient failures | TigerBeetle idempotency covers both successes and rejections (*verified*, since 0.16.4) |
 | The same client key arrives twice | The same hashed ID returns the original outcome | ID derived deterministically from the client key |
 | A hold is abandoned | TigerBeetle voids it after its timeout and returns the funds | Every authorization is a pending transfer with a timeout |
@@ -90,15 +90,15 @@ Every crash point resolves to a replay that produces the same outcome.
 | Timeout is an interval in seconds from arrival at the primary | Verified | [Time](https://docs.tigerbeetle.com/coding/time/) |
 | A transfer ID that failed with a transient error returns `id_already_failed` on retry; a new attempt needs a new ID | Verified, since 0.16.4 | [create_transfers](https://docs.tigerbeetle.com/reference/requests/create_transfers/) |
 | `pending_transfer_not_found` is one of those transient errors | Verified | [create_transfers](https://docs.tigerbeetle.com/reference/requests/create_transfers/) |
+| `pending_transfer_expired` is not transient | Verified | [create_transfers](https://docs.tigerbeetle.com/reference/requests/create_transfers/) |
+| Events in one batch are applied in order, and a post or void may reference a pending transfer created earlier in the same batch | Recollection, verify | Not stated on the create_transfers page |
 | `exists` should be handled exactly like `ok` for crash recovery | Verified | [create_transfers](https://docs.tigerbeetle.com/reference/requests/create_transfers/) |
 | Batches of about 8,190 transfers; single core, single leader | Verified | [Performance](https://docs.tigerbeetle.com/concepts/performance/) |
 | Random IDs give about 10% lower throughput than strictly increasing IDs | Verified | [Data modeling](https://docs.tigerbeetle.com/design/data-modeling/) |
 | Java client is thread-safe; one shared instance batches concurrent events | Verified | [Java client](https://docs.tigerbeetle.com/coding/clients/java/) |
 | Expiry voids may land a second or two after the timeout | Practitioner report | [Aivars Kalvāns](https://dev.to/aivarsk/running-tigerbeetle-without-a-control-plane-database-part-two-3c0p) |
-| Kafka Streams standby replicas; Kafka 4.2 Streams rebalance protocol | Verified | [Kafka docs](https://kafka.apache.org/42/streams/developer-guide/streams-rebalance-protocol/) |
 | Card networks do not resend an authorization within a round; they apply stand-in and send an advice | Recollection, verify | Scheme specifications |
 | Card-network authorization is synchronous on the hot path | Recollection, verify | Scheme specifications |
-| Kafka exactly-once commit interval defaults to about 100 ms | Recollection, verify | Kafka docs |
 
 ## 7. ID strategy
 
@@ -107,7 +107,7 @@ The mapping from a client key to a TigerBeetle ID sits behind one interface, so 
 - **Chosen: hashing.** The ID is a 128-bit hash of client ID plus client key. It needs no store, is deterministic, survives replay, and lets the edge compute it before anything else happens.
 - **Cost:** about 10% lower TigerBeetle throughput than strictly increasing IDs (*verified*). The likely mechanism (*inferred*): random keys make LSM files overlap, so compaction rewrites more and existence checks probe more levels.
 - **Contract:** TigerBeetle remembers IDs forever, so client keys must be unique per client for all time. Do not scope the hash by calendar date, or a retry crossing midnight becomes a new transfer.
-- **Retry contract:** once an ID is rejected or voided, it can never succeed again. A client retrying after a timeout either reuses the key and gets the original outcome, or uses a new key for a genuinely new attempt.
+- **Retry contract:** once an ID fails with a transient error or is voided, it can never succeed again. (Validation errors are not recorded, so an ID rejected for those could succeed if resent with corrected fields; with hashed IDs and unchanged fields this does not arise.) A client retrying after a timeout either reuses the key and gets the original outcome, or uses a new key for a genuinely new attempt.
 - **Void IDs:** each void gets its own fixed ID, the hash of the original transfer ID plus a "void" tag, so voids are idempotent too.
 - **Winning back the ~10%:** switch to time-ordered IDs behind the same interface. Either clients supply ULIDs or TigerBeetle-style time-based IDs, or a mapping layer assigns one on first sight of each client key (a Kafka Streams stage with a state store, or DynamoDB with conditional puts). The mapping layer brings back a state store, restore time after failover, and roughly 1 to 2 TB of dedupe state per day at 200k TPS (*estimate*), which is why it is not the default.
 - **Rejected:** IDs derived from Kafka partition and offset. They would need the offset of the key's first occurrence, which requires a state store anyway.
@@ -119,17 +119,17 @@ A "timed out" answer must mean that no hold survives.
 **Deadlines**
 
 - **No retries within a round** (*recollection, verify*): on an issuer timeout, the networks apply stand-in rules and later send an advice. The follow-up is a reversal, not a resend; merchant retries are usually new authorizations with new identifiers. So the timeout answer is final for that round.
-- **Two deadlines:** each command carries a core deadline of about 1.2 s, stamped as absolute time at the edge. The batcher drops commands past it instead of calling TigerBeetle. The edge deadline stays at 1.5 s; the gap covers post-TigerBeetle propagation.
+- **Two deadlines:** each command carries a core deadline of about 1.2 s, stamped as absolute time at the edge. The batcher resolves authorizations past it as `expired` instead of calling TigerBeetle; voids are exempt. The edge deadline stays at 1.5 s; the gap covers post-TigerBeetle propagation.
 - **Clocks:** the core deadline is stamped on one machine and checked on another. Normal clock synchronization keeps drift to milliseconds; this assumption is part of the design.
-- **Normal-case budget** (*estimate*): about 150 to 400 ms with default exactly-once commit intervals, under 100 ms when tuned. The risk is tail events, not the average.
+- **Normal-case budget** (*estimate*): about 150 to 400 ms, dominated by the batcher's transaction cadence and the edge's read-committed consumption of replies; under 100 ms when tuned. The risk is tail events, not the average.
 
 **The compensating void**
 
 When the edge times out, it writes a void command for that transfer ID. Three rules make the void safe:
 
-1. **Same partition, same order.** The void goes to the submission topic keyed by the same client key as the authorization, so the log delivers it after the authorization. Within one batch, TigerBeetle applies events in order. A void can never overtake the transfer it cancels.
+1. **Same partition, same order.** The void goes to the submission topic keyed by the same client key as the authorization, through the same idempotent producer, so the log delivers it after the authorization. Until in-batch ordering is verified (section 6), the batcher never puts a void in the same TigerBeetle batch as its authorization. A void can never overtake the transfer it cancels.
 2. **Fixed void ID.** The void's own ID is the hash of the transfer ID plus a "void" tag, so a replayed void is idempotent.
-3. **Benign failure.** If the authorization was dropped as expired, the void returns `pending_transfer_not_found`. That is the correct terminal state: nothing was ever held. Because this is a transient error, the void ID is then permanently failed, which is exactly what we want.
+3. **Benign failure.** If the authorization was resolved as expired, the void returns `pending_transfer_not_found`: nothing was ever held. Because this is a transient error, the void ID is then permanently failed, which is exactly what we want. If the hold already timed out, the void returns `pending_transfer_expired`, which is equally benign.
 
 Rule 1 is essential. A void sent out of band could reach TigerBeetle before the pending transfer, fail, and burn its ID, leaving the hold alive until its own timeout. **Anything that bypasses the per-key partition order, such as hedged submission through a second consumer group, breaks this guarantee.**
 
@@ -209,11 +209,18 @@ Testing is the centerpiece of the project: every invariant is checked by determi
 
 These are open in the functional and non-functional spec.
 
-1. **Overload and admission control.** With hard deadlines, a backlog makes every queued request expire, and useful throughput drops toward zero while the system looks busy. The edge must decline fast once lag or the in-flight count crosses a threshold; the batcher's cheap dropping of expired commands is the second line of defense.
+1. **Overload and admission control.** With hard deadlines, a backlog makes every queued request expire, and useful throughput drops toward zero while the system looks busy. The edge must decline fast once lag or the in-flight count crosses a threshold; the batcher's cheap expiry of late authorizations is the second line of defense.
 2. **What an authorization checks.** TigerBeetle enforces balances. Card status, limits, currency and blocked accounts are unspecified, as is whether they run before TigerBeetle or are encoded as TigerBeetle accounts and limits.
 3. **The rest of the card lifecycle.** Capture (including partial captures), incremental authorizations, reversals, and stand-in advices that force a post or void after the fact.
 4. **Silent TigerBeetle events.** Auto-expired holds produce no Kafka record. Downstream views need TigerBeetle change data capture or a periodic scan by timestamp (*verify current CDC options*).
 5. **Observability.** Per-stage latency, consumer lag, timeout rate and void rate from day one.
+
+**Follow-ups from review** (need discussion or deeper analysis):
+
+6. **Orphaned holds after an edge crash.** If the edge crashes after writing an authorization, the caller sees a dropped connection, and the hold stays until a network reversal advice or its own timeout. Decide whether that is acceptable, or whether something else must void requests whose edge died (for example a sweeper keyed on edge instance liveness).
+7. **Producer ordering under failure.** Rule 1 of the compensating void relies on one idempotent producer sending both the authorization and the void. If the authorization's send outcome is unknown, or the producer is recreated between the two sends, the order is no longer guaranteed. Define what the edge does in those cases: wait for the authorization's ack before writing the void, or treat an unacknowledged authorization differently.
+8. **Same client key, different payload.** A retry that reuses a key with a different amount or account gets TigerBeetle's `exists_with_different_*` errors rather than the original outcome. Define the client-facing response and whether the edge should catch it earlier.
+9. **Batch splitting cost.** Keeping a void out of its authorization's batch (rule 1) is cheap in the normal case, but measure it under bursts where many voids follow their authorizations closely.
 
 ## 13. Alternatives considered
 
@@ -242,3 +249,6 @@ Below about 20k TPS, the simple sync path plus a sweeper is less machinery and p
 - [ ] Decide partition counts for the submission, results and replies topics
 - [ ] Verify card-network retry and stand-in behavior against scheme documentation
 - [ ] Check TigerBeetle's current CDC options for observing auto-expired holds
+- [ ] Verify TigerBeetle's in-batch event ordering and same-batch `pending_id` references
+- [ ] Find a source for TigerBeetle's single-cluster throughput figure
+- [ ] Resolve the review follow-ups in section 12
