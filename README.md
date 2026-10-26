@@ -68,7 +68,7 @@ flowchart TD
 | Key | Identifies | Authorization | Cancel |
 | --- | --- | --- | --- |
 | Client idempotency key | The client's request | `clientKey` | The same `clientKey` |
-| TigerBeetle transfer ID | One ledger command; TigerBeetle deduplicates on it | `A = hash(clientId, clientKey)` | Fence `A` (same ID, fence code) and void `V = hash(A, "void")` |
+| TigerBeetle transfer ID | One ledger command; TigerBeetle deduplicates on it | `A = hash(clientId, clientKey)` | Fence `A` (same ID, no flags) and void `V = hash(A, "void")` |
 | Kafka record key | The hold the command concerns; only picks the partition | `A` | `A` |
 
 Every later command about a hold (cancel, capture, reversal) carries `A` as its `pending_id`, so the partitioner routes on `A` for an authorization and on `pending_id` for everything else. Kafka does not deduplicate on the record key, so two records sharing it are simply two records on one partition, in order. Keying by account would order every operation on an account for no benefit, since TigerBeetle already enforces balances, and would turn busy accounts into hot partitions.
@@ -88,8 +88,8 @@ Every crash point resolves to a replay that produces the same outcome.
 | Edge crashes after writing to Kafka | The command is processed; the caller sees a connection error and sends `cancel(clientKey)` | The caller's cancel contract and fenced cancels (section 8) |
 | Batcher crashes before calling TigerBeetle | The chunk is re-polled and submitted | Offsets are committed in the same transaction as the results |
 | Batcher crashes after TigerBeetle, before writing results | Resubmission returns `exists` for successes and `id_already_failed` for transient failures | TigerBeetle idempotency covers both successes and rejections (*verified*, since 0.16.4) |
-| Same, but the replay happens after the core deadline | The fence for `A` returns `exists_with_different_*`; the batcher looks `A` up and reports the real outcome | Expiry is a ledger write, not a clock reading (section 8) |
-| A cancel overtakes its authorization, for example a stale send from a crashed edge | The fence creates `A`; the late authorization gets `exists_with_different_*` and is reported `cancelled` | The authorization ID doubles as a fencing token (section 8) |
+| Same, but the replay happens after the core deadline | The fence for `A` returns `exists_with_different_flags`, so the authorization was created and the batcher reports it as approved | Expiry is a ledger write, not a clock reading (section 8) |
+| A cancel overtakes its authorization, for example a stale send from a crashed edge | The fence creates `A`; the late authorization gets `exists_with_different_flags` and is reported `cancelled` | The authorization ID doubles as a fencing token (section 8) |
 | The same client key arrives twice | The same hashed ID returns the original outcome | ID derived deterministically from the client key |
 | A hold is abandoned | TigerBeetle voids it after its timeout and returns the funds | Every authorization is a pending transfer with a timeout |
 | A reply is lost on the way to the client | It is a timeout from the caller's view, so the caller cancels | The caller's cancel contract (section 8) |
@@ -98,7 +98,7 @@ Every crash point resolves to a replay that produces the same outcome.
 
 - On replay, the batcher learns *that* a transient rejection happened, but not necessarily the original reason (for example insufficient funds versus account not found). Persist the reason in the result before committing, or accept a generic reason on the rare replay path.
 - `exists` must be treated exactly like `ok`, with the original result rebuilt by looking the transfer up.
-- `exists_with_different_*` on an authorization means either a fence or a reused client key with a different payload. The batcher looks `A` up and checks its `code` to tell them apart.
+- On an authorization, `exists_with_different_flags` means a fence: TigerBeetle compares flags before any other field, the edge always sets `pending`, and a fence never does. A reused client key with a different payload shows up as another `exists_with_different_*` code instead. No lookup is needed to tell them apart.
 
 ## 6. Facts: verified versus assumed
 
@@ -109,10 +109,13 @@ Every crash point resolves to a replay that produces the same outcome.
 | A transfer ID that failed with a transient error returns `id_already_failed` on retry; a new attempt needs a new ID | Verified, since 0.16.4 | [create_transfers](https://docs.tigerbeetle.com/reference/requests/create_transfers/) |
 | `pending_transfer_not_found` is one of those transient errors | Verified | [create_transfers](https://docs.tigerbeetle.com/reference/requests/create_transfers/) |
 | `pending_transfer_expired` is not transient | Verified | [create_transfers](https://docs.tigerbeetle.com/reference/requests/create_transfers/) |
-| Events in one batch are applied in order, and a post or void may reference a pending transfer created earlier in the same batch | Recollection, verify | Not stated on the create_transfers page |
-| Reusing an existing transfer ID with different fields returns `exists_with_different_*`, never `exists` | Recollection, verify | [create_transfers](https://docs.tigerbeetle.com/reference/requests/create_transfers/) |
-| A transfer between two dedicated fence accounts can be created with no balance effect (zero or token amount) | Recollection, verify | — |
-| Voiding a transfer that is not pending returns `pending_transfer_not_pending` | Recollection, verify | [create_transfers](https://docs.tigerbeetle.com/reference/requests/create_transfers/) |
+| Events in one batch run in a sequential loop, and later events see earlier ones' effects (a transient failure burns an ID for the rest of the same batch) | Verified in source | [source](https://github.com/tigerbeetle/tigerbeetle/blob/main/src/state_machine.zig), [tests](https://github.com/tigerbeetle/tigerbeetle/blob/main/src/state_machine_tests.zig) |
+| A void may reference a pending transfer created earlier in the same batch | Supported by the code path; no test found | [source](https://github.com/tigerbeetle/tigerbeetle/blob/main/src/state_machine.zig) |
+| The ID existence check runs before any other validation: an existing ID returns `exists` or `exists_with_different_*`, an orphaned one `id_already_failed` | Verified in source | [source](https://github.com/tigerbeetle/tigerbeetle/blob/main/src/state_machine.zig) (`create_transfer`) |
+| `exists_with_different_*` compares flags first, so a pending authorization against a non-pending fence returns `exists_with_different_flags` | Verified in source | [source](https://github.com/tigerbeetle/tigerbeetle/blob/main/src/state_machine.zig) (`create_transfer_exists`) |
+| Zero-amount transfers are allowed (since 0.16.0) and leave account balances untouched | Verified in source | [source](https://github.com/tigerbeetle/tigerbeetle/blob/main/src/state_machine.zig), [tests](https://github.com/tigerbeetle/tigerbeetle/blob/main/src/state_machine_tests.zig), CHANGELOG |
+| Voiding a non-pending transfer returns `pending_transfer_not_pending`, which is not transient | Verified in source | [source](https://github.com/tigerbeetle/tigerbeetle/blob/main/src/state_machine.zig) (`post_or_void_pending_transfer`) |
+| A void past the pending transfer's timeout returns `pending_transfer_expired` even before the expiry pulse has run | Verified in source | [source](https://github.com/tigerbeetle/tigerbeetle/blob/main/src/state_machine.zig) (`post_or_void_pending_transfer`) |
 | `exists` should be handled exactly like `ok` for crash recovery | Verified | [create_transfers](https://docs.tigerbeetle.com/reference/requests/create_transfers/) |
 | Batches of about 8,190 transfers; single core, single leader | Verified | [Performance](https://docs.tigerbeetle.com/concepts/performance/) |
 | Random IDs give about 10% lower throughput than strictly increasing IDs | Verified | [Data modeling](https://docs.tigerbeetle.com/design/data-modeling/) |
@@ -149,13 +152,16 @@ A "timed out" answer must mean that no hold survives, and any request without a 
 
 A cancel either releases what an authorization did or stops it from ever happening, whichever order they reach TigerBeetle in. It is one TigerBeetle batch of two unlinked events:
 
-1. **Fence:** a transfer with ID `A` itself and a dedicated fence `code`, between two fence accounts, with no balance effect.
-2. **Void:** ID `V = hash(A, "void")`, with `pending_id = A`.
+1. **Fence:** ID `A` itself, amount 0, no flags, a dedicated fence `code`, between two fence accounts on a fence ledger. Zero amount leaves both accounts untouched. One pair of fence accounts serves every currency, because TigerBeetle checks the ID before it checks ledgers.
+2. **Void:** ID `V = hash(A, "void")`, `pending_id = A`, amount 0 (the full pending amount), and accounts, ledger and code left at 0 to inherit from the pending transfer.
+
+The two events must not be linked: the fence is expected to fail when the authorization got there first, and a linked chain would roll the void back with it. The fence goes first in the batch.
 
 | What reaches TigerBeetle first | Fence | Void | Late authorization |
 | --- | --- | --- | --- |
-| The authorization | `exists_with_different_*` | Releases the hold, or `pending_transfer_expired` if it already timed out | None |
-| The cancel | Created | Fails harmlessly with `pending_transfer_not_pending` | `exists_with_different_*`; the batcher sees the fence code and reports `cancelled` |
+| The authorization | `exists_with_different_flags` | Releases the hold, or `pending_transfer_expired` if it already timed out | None |
+| The authorization, which failed with a transient error | `id_already_failed` | `pending_transfer_not_found`; nothing was ever held | None |
+| The cancel | Created | Fails harmlessly with `pending_transfer_not_pending` | `exists_with_different_flags`, reported `cancelled` |
 
 A replayed cancel is idempotent: the fence returns `exists` and the void repeats its earlier result. No rule about partitions, producers or batch boundaries is needed for correctness, so a stale authorization from a crashed edge cannot bring a cancelled hold back.
 
@@ -171,7 +177,7 @@ A replayed cancel is idempotent: the fence returns `exists` and the void repeats
 
 **Replay-safe expiry**
 
-Expiry by clock reading is not replay-safe. A batcher that submits `A` at 1.1 s, crashes before committing, and replays at 1.3 s would report `expired` while TigerBeetle holds the funds; the edge would then tell the caller "declined" and send no cancel. So expiring an authorization means writing its fence. If the fence returns `exists_with_different_*`, the authorization had already gone through, and the batcher reports its real outcome. The cost is one TigerBeetle event per expired request. Expiries are rare, and under overload Kafka and the batcher saturate before TigerBeetle.
+Expiry by clock reading is not replay-safe. A batcher that submits `A` at 1.1 s, crashes before committing, and replays at 1.3 s would report `expired` while TigerBeetle holds the funds; the edge would then tell the caller "declined" and send no cancel. So expiring an authorization means writing its fence. If the fence returns `exists_with_different_flags`, the authorization had already gone through and the batcher reports it as approved; `id_already_failed` means it had been rejected, with the reason unknown on this path (section 5). The cost is one TigerBeetle event per expired request. Expiries are rare, and under overload Kafka and the batcher saturate before TigerBeetle.
 
 **Failover**
 
@@ -231,7 +237,7 @@ Testing is the centerpiece of the project: every invariant is checked by determi
 - **Functional core:** each component (edge waiter and admission logic, batcher, deadline, fence and cancel rules) is a function from state plus event to new state plus commands. Events include request arrived, batch result returned, time advanced, consumer rebalanced.
 - **Two interpreters for the commands:** the Cats Effect shell performs them for real; the simulator performs them in a deterministic event loop.
 - **Simulator:** a plain loop over a priority queue of events ordered by simulated time, with a seeded random generator choosing delays, reorderings and crashes. No fibers involved.
-- **Simulated adapters model real semantics,** not canned mock answers: offsets, commits, redelivery and rebalances for Kafka; `exists`, `id_already_failed`, `exists_with_different_*`, `pending_transfer_not_pending`, balance limits and pending timeouts on the simulated clock for TigerBeetle.
+- **Simulated adapters model real semantics,** not canned mock answers: offsets, commits, redelivery and rebalances for Kafka; `exists`, `id_already_failed`, `exists_with_different_flags` and the other `exists_with_different_*` codes, `pending_transfer_not_pending`, `pending_transfer_expired`, balance limits and pending timeouts on the simulated clock for TigerBeetle.
 - **Reference design worth studying:** Haskell's [io-sim](https://hackage.haskell.org/package/io-sim), which runs the same code under real IO or a simulator with schedule exploration.
 
 **Fault tools compared:**
@@ -255,7 +261,7 @@ These are open in the functional and non-functional spec.
 
 **Follow-ups from review** (need discussion or deeper analysis):
 
-6. **Same client key, different payload.** A retry that reuses a key with a different amount or account gets TigerBeetle's `exists_with_different_*` errors rather than the original outcome. Define the client-facing response and whether the edge should catch it earlier. The batcher already tells this case apart from a fence by `code`.
+6. **Same client key, different payload.** A retry that reuses a key with a different amount or account gets TigerBeetle's `exists_with_different_*` errors rather than the original outcome. Define the client-facing response and whether the edge should catch it earlier. The batcher already tells this case apart from a fence by result code alone (section 5).
 
 ## 13. Alternatives considered
 
@@ -281,7 +287,7 @@ Each stage checks the assumptions the next one builds on: the simulator encodes 
 
 | Stage | Goal | Done when |
 | --- | --- | --- |
-| 0. Fact spike | Throwaway scripts against single-node TigerBeetle and local Kafka: a fence transfer with no balance effect, error codes (`exists_with_different_*`, `pending_transfer_not_pending`, transient and expired results), pending timeouts | Every TigerBeetle and Kafka fact in section 6 is verified or refuted |
+| 0. Fact spike | Source reading and throwaway scripts against single-node TigerBeetle and local Kafka. The fence's TigerBeetle facts are verified in source; open are expiry lag, the throughput figure, CDC and card-network behavior | Every TigerBeetle and Kafka fact in section 6 is verified or refuted |
 | 1. Spec as code | Domain types (commands, outcomes, rejection reasons, routing key) and the invariants of section 11 as predicates over an event history; scope is authorization and cancel only | Invariants compile and fail on hand-written bad histories |
 | 2. Pure core | State machines for the batcher, edge waiter and admission control, fenced cancels and replay-safe expiry; no effects | Property tests pass per machine |
 | 3. Deterministic simulator | Seeded event loop with simulated Kafka and TigerBeetle that behave as stage 0 found | Millions of seeds pass, failures replay by seed, and planted bugs are caught |
