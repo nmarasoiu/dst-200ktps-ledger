@@ -48,7 +48,7 @@ Requests flow through Kafka topics and a single processing stage, the batcher; P
 flowchart TD
     Bank["Bank / card network"] <-->|"sync call, 1.5 s deadline"| Edge
     Edge["Edge adapter<br/>hash client key → TigerBeetle ID<br/>waiter table, admission control"]
-    Edge -->|"authorization or void,<br/>keyed by client key"| Sub[("submission topic")]
+    Edge -->|"authorization or void,<br/>keyed by authorization ID"| Sub[("submission topic")]
     Sub --> Batcher["Batcher<br/>poll, expire late authorizations,<br/>batch up to ~8k"]
     Batcher <-->|"one batch call"| TB[["TigerBeetle<br/>balances, holds, timeouts<br/>idempotent on ok and failure"]]
     Batcher --> Res[("results topic<br/>full outcome")]
@@ -59,9 +59,24 @@ flowchart TD
 ```
 
 - **Edge adapter:** accepts the call, derives the TigerBeetle ID by hashing the client key (section 7), registers a waiter, and writes the command to the submission topic.
-- **Submission topic:** keyed by client key, so an authorization and its later void land on the same partition, in order.
+- **Submission topic:** keyed by the authorization's transfer ID, so an authorization and its later void land on the same partition, in order.
 - **Batcher:** polls a chunk, resolves authorizations past their core deadline as `expired` without calling TigerBeetle, submits the rest to TigerBeetle as one batch, then writes results, slim replies and the consumed offsets in one Kafka transaction. Voids are never expired: they are always submitted, however late.
 - **Replies topic:** broadcast to every edge instance; each completes only its own waiters (section 9).
+
+**Three keys, three jobs.** Idempotency is per command; routing is per hold.
+
+| Key | Identifies | Authorization | Void |
+| --- | --- | --- | --- |
+| Client idempotency key | The client's request | `clientKey` | None; the edge creates the void |
+| TigerBeetle transfer ID | One ledger command; TigerBeetle deduplicates on it | `A = hash(clientId, clientKey)` | `V = hash(A, "void")` |
+| Kafka record key | The hold the command concerns; only picks the partition | `A` | `A`, taken from the void's `pending_id` |
+
+Every later command about a hold (void, capture, reversal) carries `A` as its `pending_id`, so the partitioner routes on `A` for an authorization and on `pending_id` for everything else. Kafka does not deduplicate on the record key, so two records sharing it are simply two records on one partition, in order. Keying by account would order every operation on an account for no benefit, since TigerBeetle already enforces balances, and would turn busy accounts into hot partitions.
+
+**Submission topic rules** that follow from sharing the key:
+
+- **`cleanup.policy=delete`, never `compact`.** Compaction keeps only the latest record per key, so a void would erase its own authorization from the log.
+- **Partition count fixed for the topic's life.** The default partitioner maps a key to `hash(key) mod N`; changing N would split an authorization and its void across partitions. Resizing means a new topic and draining the old one, so choose N with headroom.
 
 ## 5. Correctness under crash-stop
 
@@ -127,7 +142,7 @@ A "timed out" answer must mean that no hold survives.
 
 When the edge times out, it writes a void command for that transfer ID. Three rules make the void safe:
 
-1. **Same partition, same order.** The void goes to the submission topic keyed by the same client key as the authorization, through the same idempotent producer, so the log delivers it after the authorization. Until in-batch ordering is verified (section 6), the batcher never puts a void in the same TigerBeetle batch as its authorization. A void can never overtake the transfer it cancels.
+1. **Same partition, same order.** The void goes to the submission topic with the same record key as the authorization (`A`), through the same idempotent producer, so the log delivers it after the authorization. The edge writes the void only once the authorization's send has completed, with an ack or an error, never while it is still in flight. The timeout reply to the caller does not wait for this; only the void does. Until in-batch ordering is verified (section 6), the batcher never puts a void in the same TigerBeetle batch as its authorization. A void can never overtake the transfer it cancels.
 2. **Fixed void ID.** The void's own ID is the hash of the transfer ID plus a "void" tag, so a replayed void is idempotent.
 3. **Benign failure.** If the authorization was resolved as expired, the void returns `pending_transfer_not_found`: nothing was ever held. Because this is a transient error, the void ID is then permanently failed, which is exactly what we want. If the hold already timed out, the void returns `pending_transfer_expired`, which is equally benign.
 
@@ -147,7 +162,7 @@ The pending transfer's own timeout remains the last backstop if a void is lost e
 
 Start with broadcast over a slim replies topic; switch to reply addressing only if the edge fleet grows past about 50 instances.
 
-- **The problem:** the client key decides where work is processed, but the load balancer decides which edge instance holds the TCP or QUIC connection. The result must cross from one mapping to the other.
+- **The problem:** the authorization ID decides where work is processed, but the load balancer decides which edge instance holds the TCP or QUIC connection. The result must cross from one mapping to the other.
 - **Best-effort by design:** results are durable, and deadlines plus voids keep the ledger consistent. A lost reply is a timeout, not a correctness failure.
 - **Edge waiter table:** an in-memory map from request ID to waiting connection, each entry expiring at the deadline. The whole fleet holds at most about 300k entries at 200k TPS and 1.5 s.
 - **Chosen: broadcast.** Every edge instance reads the slim replies topic (request ID, outcome code, amount) and completes only its own waiters. The request ID sits in the record key or a header, so non-matching records are skipped without parsing.
@@ -211,16 +226,16 @@ These are open in the functional and non-functional spec.
 
 1. **Overload and admission control.** With hard deadlines, a backlog makes every queued request expire, and useful throughput drops toward zero while the system looks busy. The edge must decline fast once lag or the in-flight count crosses a threshold; the batcher's cheap expiry of late authorizations is the second line of defense.
 2. **What an authorization checks.** TigerBeetle enforces balances. Card status, limits, currency and blocked accounts are unspecified, as is whether they run before TigerBeetle or are encoded as TigerBeetle accounts and limits.
-3. **The rest of the card lifecycle.** Capture (including partial captures), incremental authorizations, reversals, and stand-in advices that force a post or void after the fact.
+3. **The rest of the card lifecycle.** Capture (including partial captures), incremental authorizations, reversals, and stand-in advices that force a post or void after the fact. Network reversals and advices arrive with network identifiers, not `A`, so they need a lookup from network identifiers to `A` (served by the results topic or the Postgres projection) before they can be routed.
 4. **Silent TigerBeetle events.** Auto-expired holds produce no Kafka record. Downstream views need TigerBeetle change data capture or a periodic scan by timestamp (*verify current CDC options*).
 5. **Observability.** Per-stage latency, consumer lag, timeout rate and void rate from day one.
 
 **Follow-ups from review** (need discussion or deeper analysis):
 
 6. **Orphaned holds after an edge crash.** If the edge crashes after writing an authorization, the caller sees a dropped connection, and the hold stays until a network reversal advice or its own timeout. Decide whether that is acceptable, or whether something else must void requests whose edge died (for example a sweeper keyed on edge instance liveness).
-7. **Producer ordering under failure.** Rule 1 of the compensating void relies on one idempotent producer sending both the authorization and the void. If the authorization's send outcome is unknown, or the producer is recreated between the two sends, the order is no longer guaranteed. Define what the edge does in those cases: wait for the authorization's ack before writing the void, or treat an unacknowledged authorization differently.
+7. **A failed send landing late.** Rule 1 writes the void only after the authorization's send completes. A failed idempotent send is ambiguous: the record may or may not be in the log. Verify that once the producer reports the failure, no stale request for it can still be appended after a later send, including when the producer is recreated.
 8. **Same client key, different payload.** A retry that reuses a key with a different amount or account gets TigerBeetle's `exists_with_different_*` errors rather than the original outcome. Define the client-facing response and whether the edge should catch it earlier.
-9. **Batch splitting cost.** Keeping a void out of its authorization's batch (rule 1) is cheap in the normal case, but measure it under bursts where many voids follow their authorizations closely.
+9. **Batch splitting cost.** Keeping a void out of its authorization's batch (rule 1) is cheap in the normal case, but measure it under bursts where many voids follow their authorizations closely. Moot if stage 0 confirms in-batch ordering.
 
 ## 13. Alternatives considered
 
@@ -244,8 +259,8 @@ Each stage checks the assumptions the next one builds on: the simulator encodes 
 
 | Stage | Goal | Done when |
 | --- | --- | --- |
-| 0. Fact spike | Throwaway scripts against single-node TigerBeetle and local Kafka: in-batch ordering, same-batch `pending_id`, error codes, pending timeouts, transactional ordering of an authorization and its void | Every TigerBeetle and Kafka fact in section 6 is verified or refuted |
-| 1. Spec as code | Domain types (commands, outcomes, rejection reasons) and the invariants of section 11 as predicates over an event history; scope is authorization and void only | Invariants compile and fail on hand-written bad histories |
+| 0. Fact spike | Throwaway scripts against single-node TigerBeetle and local Kafka: in-batch ordering, same-batch `pending_id`, error codes, pending timeouts, whether a failed idempotent send can land after a later one | Every TigerBeetle and Kafka fact in section 6 is verified or refuted |
+| 1. Spec as code | Domain types (commands, outcomes, rejection reasons, routing key) and the invariants of section 11 as predicates over an event history; scope is authorization and void only | Invariants compile and fail on hand-written bad histories |
 | 2. Pure core | State machines for the batcher, edge waiter and admission control, deadlines and voids; no effects | Property tests pass per machine |
 | 3. Deterministic simulator | Seeded event loop with simulated Kafka and TigerBeetle that behave as stage 0 found | Millions of seeds pass, failures replay by seed, and planted bugs are caught |
 | 4. Contract tests | One suite run against both the simulators and the real binaries | Green on both in CI |
