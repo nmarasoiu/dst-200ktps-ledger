@@ -238,17 +238,23 @@ These are open in the functional and non-functional spec.
 
 Below about 20k TPS, the simple sync path plus a sweeper is less machinery and probably the better choice.
 
-## 14. Next steps
+## 14. Development stages
 
-- [ ] Specify admission control at the edge: thresholds on lag and in-flight count, and the fast-decline response
-- [ ] Write the pure state machines for the edge, batcher, deadlines and voids, with their command vocabulary
-- [ ] Build the deterministic simulator with simulated Kafka and TigerBeetle, and encode the invariants
-- [ ] Write contract tests that run against both simulators and real binaries
-- [ ] Sketch the latency budget per stage against the 1.5 s deadline, then measure it
-- [ ] Measure consumer CPU and broker egress for broadcast replies
-- [ ] Decide partition counts for the submission, results and replies topics
-- [ ] Verify card-network retry and stand-in behavior against scheme documentation
-- [ ] Check TigerBeetle's current CDC options for observing auto-expired holds
-- [ ] Verify TigerBeetle's in-batch event ordering and same-batch `pending_id` references
-- [ ] Find a source for TigerBeetle's single-cluster throughput figure
-- [ ] Resolve the review follow-ups in section 12
+Each stage checks the assumptions the next one builds on: the simulator encodes TigerBeetle and Kafka behavior, so that behavior is checked against the real systems first. Work is tracked as one [GitHub milestone](https://github.com/nmarasoiu/dst-200ktps-ledger/milestones) per stage, with issues under each.
+
+| Stage | Goal | Done when |
+| --- | --- | --- |
+| 0. Fact spike | Throwaway scripts against single-node TigerBeetle and local Kafka: in-batch ordering, same-batch `pending_id`, error codes, pending timeouts, transactional ordering of an authorization and its void | Every TigerBeetle and Kafka fact in section 6 is verified or refuted |
+| 1. Spec as code | Domain types (commands, outcomes, rejection reasons) and the invariants of section 11 as predicates over an event history; scope is authorization and void only | Invariants compile and fail on hand-written bad histories |
+| 2. Pure core | State machines for the batcher, edge waiter and admission control, deadlines and voids; no effects | Property tests pass per machine |
+| 3. Deterministic simulator | Seeded event loop with simulated Kafka and TigerBeetle that behave as stage 0 found | Millions of seeds pass, failures replay by seed, and planted bugs are caught |
+| 4. Contract tests | One suite run against both the simulators and the real binaries | Green on both in CI |
+| 5. Cats Effect shell | fs2-kafka, the TigerBeetle client wrapped in `IO`, the http4s edge; TestControl shell tests | End to end on a laptop at low rate, surviving manual kills of any process |
+| 6. Offline checker and Toxiproxy | A tool that reads the topics and TigerBeetle after a run and checks the same invariants; network fault scenarios in CI | Scripted network faults pass the checker |
+| 7. Performance | Load generator stepping 20k, 100k, 200k and 300k TPS; per-stage latency, broadcast egress, partition counts, admission control under real load | 200k TPS with p99 inside 1.5 s, or a known ceiling and its cause |
+| 8. Cluster chaos | Chaos Mesh in a Kubernetes staging cluster; Antithesis optional | The checker stays green across scheduled chaos runs |
+
+- **One set of invariants for every stage.** They are defined once in stage 1 and checked by the simulator, the contract tests, the offline checker and the chaos runs.
+- **Modules mirror the stages:** `core` (no dependencies), `sim`, `checker`, `shell`, `contract-tests`, `loadgen`. The compiler keeps the core free of effects.
+- **A simulator that never fails proves nothing.** Stage 3 includes planted bugs, such as expiring a void or letting a void overtake its authorization, and the simulator must catch them.
+- **Stages 2 to 4 are the heart of the project.** A walking skeleton on real binaries before stage 5 would mostly repeat stage 0.
