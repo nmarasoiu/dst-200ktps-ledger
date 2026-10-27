@@ -4,7 +4,7 @@
 
 A hobby design for a card-authorization ledger pipeline that sustains 50,000 transactions per second (TPS), stays correct under crash-stop failures, and is proven correct mainly by deterministic simulation and fault injection. It serves as the starting functional spec, non-functional spec and design for an implementation in Scala 3 with Cats Effect.
 
-**Also in this repo:** [DESIGN-LOG.md](DESIGN-LOG.md) records every decision that was corrected and how the flaw was found; [ROADMAP.md](ROADMAP.md) lists the phases beyond the core.
+**Also in this repo:** [DESIGN-LOG.md](DESIGN-LOG.md) records every decision that was corrected and how the flaw was found; [ROADMAP.md](ROADMAP.md) lists the phases beyond the core. [CLAUDE.md](CLAUDE.md) holds the conventions for anyone, human or agent, editing the repo.
 
 **Status markers used throughout:** *verified* = checked against the cited source; *estimate* = rough reasoning, to measure; *recollection* or *verify* = believed true, not yet checked.
 
