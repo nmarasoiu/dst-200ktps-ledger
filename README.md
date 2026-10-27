@@ -141,7 +141,7 @@ Every crash point resolves to a replay that produces the same outcome.
 | Built-in change data capture reports every transfer, including auto-expired holds as `two_phase_expired`, but publishes only over AMQP 0.9.1 (RabbitMQ), at least once, from a single instance. The `get_change_events` operation underneath is not in the Java client | Verified | [CDC](https://docs.tigerbeetle.com/operating/cdc/), [source](https://github.com/tigerbeetle/tigerbeetle/blob/main/src/tigerbeetle.zig) |
 | Kafka's default partitioner maps a key to `murmur2(key) mod N` | Verified in source | [source](https://github.com/apache/kafka/blob/trunk/clients/src/main/java/org/apache/kafka/clients/producer/internals/BuiltInPartitioner.java) (`partitionForKey`) |
 | A zombie's transactional offset commit is rejected once its partition is reassigned, under both the classic and the new consumer group protocols, but only if the producer sends the consumer's live group metadata; a commit carrying only the group ID is not checked | Verified in source | [source](https://github.com/apache/kafka/blob/trunk/group-coordinator/src/main/java/org/apache/kafka/coordinator/group/modern/consumer/ConsumerGroup.java) (`validateOffsetCommit`) |
-| fs2-kafka sends the consumer's live group metadata with transactional offsets | Verified in source | [source](https://github.com/fd4s/fs2-kafka/blob/main/modules/core/src/main/scala/fs2/kafka/KafkaProducer.scala) |
+| fs2-kafka sends the consumer's live group metadata with transactional offsets: it reads the metadata from the consumer when it commits. The project has moved from `fd4s` to `typelevel` | Verified in source | [source](https://github.com/typelevel/fs2-kafka/blob/main/modules/core/src/main/scala/fs2/kafka/KafkaProducer.scala) (`produceAndCommitTransactionally`) |
 | Card networks do not resend an authorization within a round; they apply stand-in and send an advice | Recollection, verify | Scheme specifications |
 | Card-network authorization is synchronous on the hot path | Recollection, verify | Scheme specifications |
 | An acquirer that gets no issuer answer sends a reversal for that authorization | Recollection, verify | ISO 8583 and scheme specifications |
@@ -284,30 +284,54 @@ Testing is the centerpiece of the project: every invariant is checked by determi
 
 | Layer | What runs | Faults | Reproducible | Catches |
 | --- | --- | --- | --- | --- |
-| 1. Deterministic simulation (DST) | Pure core plus simulated Kafka, TigerBeetle, clock and network in one thread | Crash between any two steps, redelivery, duplicates, rebalances, lag, lost replies, slow partitions, overload | Yes, by seed | Interleaving and recovery bugs in pipeline logic |
-| 2. Contract tests | The same small suite against simulators and real Kafka and TigerBeetle | None; semantics only | Yes | Simulators drifting from real behavior |
-| 3. Shell tests (TestControl) | Cats Effect shell against simulated ports | Timeouts, cancellation, scheduling order | Mostly, by seed | Wiring bugs in the shell |
+| 0. Example and property tests | One rule or one state machine of the pure core | None | Yes | A rule that disagrees with a row of the tables in sections 5 and 8, or a machine that breaks a property |
+| 1. Deterministic simulation (DST) | Pure core plus simulated Kafka, TigerBeetle, clock and network in one thread | Crash between any two steps, redelivery, duplicates, rebalances, lag, lost replies, slow partitions, overload, clock skew | Yes, by seed | Interleaving and recovery bugs in pipeline logic |
+| 2. Contract tests | The same small suite, port by port, against the simulated adapter and the real system | None; semantics only | Yes | Simulators drifting from real behavior |
+| 3. Shell tests (TestControl) | Cats Effect shell against the simulated adapters | Timeouts, cancellation, scheduling order | Mostly, by seed | Wiring bugs in the shell |
 | 4. Network perturbation (Toxiproxy) | Real binaries in Docker Compose or CI | Latency, jitter, bandwidth limits, resets, half-open connections | Partly, by scripted scenario | Timeouts, retry storms, deadline handling |
 | 5. Cluster chaos (Chaos Mesh or LitmusChaos) | Real deployment in a staging cluster | Pod and node kills, partitions, I/O delay, CPU pressure, clock skew | No | Failover and rebalance behavior at scale |
 | 6. Optional: Antithesis | Real containers in a deterministic hypervisor | Generated faults across the whole system | Yes | Black-box bugs DST cannot model |
 
-**Invariants checked in every layer:**
+**Safety invariants, checked in every layer.** They hold at every point of every run, whatever the faults and whatever the clock skew between machines:
 
 - No transfer is applied twice.
-- Every request reaches exactly one terminal outcome. For an authorization it is a decision, approved or declined, and the reason is best-effort detail (section 5).
+- No request reaches two different terminal outcomes. For an authorization the outcome is a decision, approved or declined, and the reason is best-effort detail (section 5).
 - Once a cancel for a request has been reported `cancelled`, no hold for that request survives, no later authorization with its ID can create one, and no capture can post it.
 - A hold is captured at most once, for no more than it held, and once captured it is never reported cancelled.
 - Whenever the edge replied with an outcome, it matches the ledger.
 - Balances never break their configured limits.
+
+**Liveness and timeliness, checked once faults stop.** The simulator heals every fault and keeps running; the real-binary layers check after the fault scenario ends:
+
+- Every request that reaches a live edge instance gets an answer within the 1.5 s edge deadline, by that instance's clock.
+- Every request reaches a terminal outcome, and every cancel is acknowledged.
+- Every hold ends: captured, voided, or expired by TigerBeetle within its timeout plus the expiry lag.
 - Under overload, useful throughput stays above a floor instead of collapsing to zero.
+
+**One history for every layer.** The invariants are predicates over a history with three sources: what each caller sent and was told, what the pipeline wrote to its topics, and what TigerBeetle holds. The simulator records all three. In real runs a workload driver records the first, and the offline checker reads the other two. Several invariants are about what the caller was told, which no topic records.
 
 **Core as pure state machines.** No JVM effect runtime is fully plug-and-play for DST: Kyo lacks a deterministic scheduler, and Cats Effect TestControl breaks on outside threads. So the money logic is a functional core with an imperative shell, as FoundationDB and TigerBeetle do.
 
-- **Functional core:** each component (edge waiter and admission logic, batcher, deadline, fence, cancel and capture rules) is a function from state plus event to new state plus commands. Events include request arrived, batch result returned, time advanced, consumer rebalanced.
-- **Two interpreters for the commands:** the Cats Effect shell performs them for real; the simulator performs them in a deterministic event loop.
-- **Simulator:** a plain loop over a priority queue of events ordered by simulated time, with a seeded random generator choosing delays, reorderings and crashes. No fibers involved.
+- **Functional core:** each component (edge waiter and admission logic, batcher, deadline, fence, cancel and capture rules) is a function from state plus event to new state plus effects. Events include request arrived, batch result returned, time advanced, consumer rebalanced. Effects are what the shell must do, such as write to a topic or call TigerBeetle; "command" stays the word for an authorization, cancel or capture.
+- **Ports:** events and effects cross a small set of ports. The caller API drives the edge. The edge writes to the submission log and reads the reply feed. The batcher polls the command source, which also reports partition assignments. It calls the ledger, then hands results, replies and offsets to the outcome sink as one transaction. Every process reads its own clock. Each port has a real adapter in the shell and a simulated one in the simulator.
+- **Two interpreters for the effects:** the Cats Effect shell performs them for real; the simulator performs them in a deterministic event loop. The shell makes no decisions, so the code the simulator never runs is wiring.
+- **Simulator:** a plain loop over a priority queue of events ordered by simulated time, with a seeded random generator choosing delays, reorderings and crashes. No fibers involved. Each process has its own clock, with a skew the seed chooses. Safety must hold under any skew, because expiry is decided by a ledger write; only timeliness may suffer (*estimate*, for the simulator to show).
 - **Simulated adapters model real semantics,** not canned mock answers: offsets, commits, redelivery and rebalances for Kafka; `exists`, `id_already_failed`, `exists_with_different_flags` and the other `exists_with_different_*` codes, `pending_transfer_not_pending`, `pending_transfer_expired`, full and partial posts, `pending_transfer_already_posted` and `pending_transfer_already_voided`, balance limits and pending timeouts on the simulated clock for TigerBeetle.
-- **Reference design worth studying:** Haskell's [io-sim](https://hackage.haskell.org/package/io-sim), which runs the same code under real IO or a simulator with schedule exploration.
+- **Liveness mode:** after a fault phase, the simulator heals every fault and keeps running, then checks the liveness and timeliness properties. TigerBeetle's simulator does the same (*verified in source*: `transition_to_liveness_mode` in `src/vopr.zig`), and Kafka's Raft simulation checks invariants after every event and validations at the end (*verified in source*: `EventScheduler` in `RaftEventSimulationTest`).
+- **Coverage marks:** each row of the tables in sections 5 and 8 gets a named mark in the core. Its example test asserts that it hits the mark, and the simulator counts how often each mark is hit across seeds. So "millions of seeds pass" comes with evidence that the hard cases were reached. TigerBeetle uses the same device (*verified in source*: `src/testing/marks.zig`).
+- **Reference designs worth studying:** Haskell's [io-sim](https://hackage.haskell.org/package/io-sim), which runs the same code under real IO or a simulator with schedule exploration; TigerBeetle's simulator, `src/vopr.zig`; and, on the JVM, Kafka's `RaftEventSimulationTest`: one event queue, a seeded `Random` and `MockTime`.
+
+**Which tests, for what.** There is no single pyramid. Each subject has its own small one, and the invariants are the oracle they share.
+
+- **Rules: example tests.** Every row of the tables in sections 5 and 8 is a test, written before the rule it checks. Tests call the core through its public functions, such as a machine's step function or the mapping of a result code, never through internal helpers, so a refactor that keeps the behavior keeps the tests. There is nothing to mock: the core is pure, so the only test doubles are the simulated adapters, and contract tests hold them to the real systems.
+- **Machines: property tests.** Each machine runs generated event sequences against properties, for example that no authorization past its deadline is submitted without a fence.
+- **Pipeline: the simulator.** The whole pipeline under generated faults, checked by the invariants.
+- **Simulated adapters: contract tests.** Each suite is written before its simulated adapter and runs first against the real system, so the real system is the oracle the adapter is built to match.
+- **Shell: TestControl, then real binaries.** The shell holds no decisions, so its tests check wiring: timeouts, cancellation and ordering.
+- **Real system: the offline checker.** Toxiproxy scenarios, process kills and chaos runs are judged by the same invariants.
+- **Tests of the tests.** Hand-written bad histories for each invariant (stage 1), planted bugs for the simulator (stage 3), and coverage marks for the generators.
+
+**Test first, at three grains.** The invariants come before the machines (stage 1), each table row's example test before its rule (stage 2), and each contract test before its simulated adapter (stages 3 and 4). The simulator is not the inner loop: its failures are long traces, and it needs the whole pipeline. It is the net that catches what the examples did not foresee.
 
 **Fault tools compared:**
 
@@ -359,18 +383,46 @@ Each stage checks the assumptions the next one builds on: the simulator encodes 
 | Stage | Goal | Done when |
 | --- | --- | --- |
 | 0. Fact spike | Source reading and throwaway scripts against single-node TigerBeetle and local Kafka. The fence, expiry, CDC and Kafka fencing facts are verified in source; TigerBeetle's throughput is assumed, not measured (section 3). Card-network behavior needs scheme specifications and blocks only the card lifecycle | Every TigerBeetle and Kafka fact in section 6 is verified or refuted. *Done* |
-| 1. Spec as code | Domain types (commands, outcomes, rejection reasons, routing key) and the invariants of section 11 as predicates over an event history; scope is authorization, cancel and one capture per hold | Invariants compile and fail on hand-written bad histories |
-| 2. Pure core | State machines for the batcher, edge waiter and admission control, fenced cancels, captures and replay-safe expiry; no effects | Property tests pass per machine |
-| 3. Deterministic simulator | Seeded event loop with simulated Kafka and TigerBeetle that behave as stage 0 found | Millions of seeds pass, failures replay by seed, and planted bugs are caught |
-| 4. Contract tests | One suite run against both the simulators and the real binaries | Green on both in CI |
-| 5. Cats Effect shell | fs2-kafka, the TigerBeetle client wrapped in `IO`, the http4s edge; TestControl shell tests | End to end on a laptop at low rate, surviving manual kills of any process |
-| 6. Offline checker and Toxiproxy | A tool that reads the topics and TigerBeetle after a run and checks the same invariants; network fault scenarios in CI | Scripted network faults pass the checker |
-| 7. Performance | Load generator stepping 10k, 25k, 50k and 75k TPS, with captures, cancels and abandoned holds; per-stage latency, broadcast egress, partition counts, admission control under real load | 50k TPS with p99 inside 1.5 s, or a known ceiling and its cause |
+| 1. Spec as code | Domain types (commands, outcomes, rejection reasons, routing key), the permanent ID hash, the history format of section 11, and the invariants of section 11 as predicates over it; scope is authorization, cancel and one capture per hold | Invariants compile and fail on hand-written bad histories; the ID hash has fixed test vectors |
+| 2. Pure core | The ports (each machine's events and effects); the rules for authorizations, replay-safe expiry, fenced cancels and captures; state machines for the batcher, the edge waiter and admission control; no effects | Every row of the tables in sections 5 and 8 passes as an example test, and property tests pass per machine |
+| 3. Deterministic simulator | Seeded event loop with simulated Kafka and TigerBeetle that behave as stage 0 found, a simulated caller, liveness mode and coverage marks | Millions of seeds pass, failures replay by seed, planted bugs are caught, and every coverage mark is hit |
+| 4. Contract tests | One suite per port, run against both the simulated adapter and the real system. Each suite is written before its simulated adapter, so this stage runs alongside stage 3. The real TigerBeetle adapter is built here, so its suite tests the adapter the shell will use | Green on both in CI |
+| 5. Cats Effect shell | fs2-kafka, the http4s edge, the stage 4 TigerBeetle adapter; TestControl shell tests | End to end on a laptop at low rate, surviving manual kills of any process |
+| 6. Offline checker and Toxiproxy | A workload driver that follows the caller's contracts and records what it was told; a tool that reads that record, the topics and TigerBeetle after a run and checks the same invariants; network fault scenarios in CI | Scripted network faults pass the checker |
+| 7. Performance | The stage 6 driver stepping 10k, 25k, 50k and 75k TPS, with captures, cancels and abandoned holds; per-stage latency, broadcast egress, partition counts, admission control under real load | 50k TPS with p99 inside 1.5 s, or a known ceiling and its cause |
 | 8. Cluster chaos | Chaos Mesh in a Kubernetes staging cluster; Antithesis optional | The checker stays green across scheduled chaos runs |
 
-- **One set of invariants for every stage.** They are defined once in stage 1 and checked by the simulator, the contract tests, the offline checker and the chaos runs.
-- **Modules mirror the stages:** `core` (no dependencies), `sim`, `checker`, `shell`, `contract-tests`, `loadgen`. The compiler keeps the core free of effects.
-- **A simulator that never fails proves nothing.** Stage 3 includes planted bugs, such as expiring by the clock without a fence, a cancel that voids without fencing, or an edge that cancels when a capture times out, and the simulator must catch them.
+- **One set of invariants for every stage.** They are defined once in stage 1, over one history format, and checked by the simulator, the contract tests, the offline checker and the chaos runs.
+- **Modules mirror the stages:** `core` (no dependencies), `sim`, `checker`, `shell`, `contract-tests`, `loadgen`. The compiler keeps the core free of effects. The caller's contracts are a pure machine too, so the simulated caller and the stage 6 workload driver share them.
+- **A simulator that never fails proves nothing.** Stage 3 includes planted bugs, such as expiring by the clock without a fence, a cancel that voids without fencing, or an edge that cancels when a capture times out, and the simulator must catch them. A simulator that never reaches the hard cases proves little, which is what the coverage marks show.
 - **Stages 2 to 4 are the heart of the project.** A walking skeleton on real binaries before stage 5 would mostly repeat stage 0.
+- **The Postgres projection is not a stage.** It is off the hot path and arrives with the accounting views ([ROADMAP](ROADMAP.md) phase E). The offline checker reconciles it once it exists.
 
 Beyond stage 8, [ROADMAP.md](ROADMAP.md) covers the card lifecycle, sharding, formal verification, multiple currencies, accounting views, risk checks, operations and a reusable simulation library.
+
+## 15. Open-source projects
+
+Every open-source project the design uses, cites or set aside, and when it is first needed. "Source read" means section 6 or section 11 cites the project's code.
+
+| Project | Role here | Kind | First needed |
+| --- | --- | --- | --- |
+| [TigerBeetle](https://github.com/tigerbeetle/tigerbeetle) | The ledger. Its simulator (`src/vopr.zig`), coverage marks (`src/testing/marks.zig`) and whole-system test (`src/vortex.zig`) are reference designs. Source read | Runtime; reference | Stage 0 |
+| TigerBeetle Java client (in the same repository, `src/clients/java`) | The real ledger adapter | Runtime | Stage 4 |
+| [Apache Kafka](https://github.com/apache/kafka) | Submission, results and replies topics. `RaftEventSimulationTest` is a simulation on the JVM. Source read | Runtime; reference | Stage 0 |
+| [fs2-kafka](https://github.com/typelevel/fs2-kafka) | Kafka in the shell, with transactional offsets that carry the consumer's live group metadata. Source read | Runtime | Stage 4 |
+| [Cats Effect](https://github.com/typelevel/cats-effect) and [fs2](https://github.com/typelevel/fs2) | The shell's runtime; `TestControl` for shell tests | Runtime; test tool | Stage 4 |
+| [http4s](https://github.com/http4s/http4s) with Ember | The edge's API | Runtime | Stage 5 |
+| [otel4s](https://github.com/typelevel/otel4s) | Tracing and metrics (section 12, gap 5) | Runtime | Stage 5 |
+| [ScalaCheck](https://github.com/typelevel/scalacheck) or [Hedgehog](https://github.com/hedgehogqa/scala-hedgehog), with munit or weaver | Example and property tests; one is to be chosen | Test tool | Stage 1 |
+| [Testcontainers](https://github.com/testcontainers/testcontainers-java) | Real TigerBeetle and Kafka for the contract tests | Test tool | Stage 4 |
+| [Toxiproxy](https://github.com/Shopify/toxiproxy) | Network faults between real processes | Test tool | Stage 6 |
+| [Chaos Mesh](https://github.com/chaos-mesh/chaos-mesh) or [LitmusChaos](https://github.com/litmuschaos/litmus) | Faults in a Kubernetes staging cluster | Test tool | Stage 8 |
+| [PostgreSQL](https://github.com/postgres/postgres), with [Skunk](https://github.com/typelevel/skunk) or [Doobie](https://github.com/typelevel/doobie) | The queryable projection | Runtime | Phase E |
+| [TLA+](https://github.com/tlaplus/tlaplus) or [P](https://github.com/p-org/P) | Models of fence-then-void and replay-safe expiry | Test tool | Phase C |
+| [Elle](https://github.com/jepsen-io/elle) | Jepsen's history checker, a reference for checking client histories | Reference | Phase C |
+| [io-sim](https://github.com/input-output-hk/io-sim) | The same code under real IO or a simulator | Reference | Stage 3 |
+| [OpenDST](https://github.com/pingidentity/opendst) and [Fray](https://github.com/cmu-pasta/fray) | Deterministic scheduling of real JVM threads, which could one day run the shell under simulation. OpenDST is at 0.1.0 and needs JDK 25 (*verified* on its project page) | Reference | Phase H |
+| [RabbitMQ](https://github.com/rabbitmq/rabbitmq-server) | The only transport of TigerBeetle's change data capture (AMQP 0.9.1), an optional audit feed | Optional | Parking lot |
+| [Redpanda Connect](https://github.com/redpanda-data/connect) | Its `tigerbeetle_cdc` input is one route from that feed to Kafka | Optional | Parking lot |
+| [Debezium](https://github.com/debezium/debezium) | Change data capture from Postgres, for the original Postgres-hub design (section 13) | Set aside | None |
+| [Kyo](https://github.com/getkyo/kyo) | Considered for the shell (section 10) | Set aside | None |
