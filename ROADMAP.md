@@ -80,6 +80,17 @@ Extract the stage 3 simulator into a reusable open-source library for the JVM, s
 
 **Depends on** stage 3. **Done when** a second, unrelated project uses it.
 
+## Parking lot
+
+Small items noticed in review. None blocks a stage; pick each up when its area is touched.
+
+- **Start the build small (#8).** Begin with `core` and `sim`; add `checker`, `shell`, `contract-tests` and `loadgen` when their stage starts.
+- **Issue bodies drift.** They copy README details and cite follow-up numbers, which have already moved: #4, #12 and #33 point at follow-ups that are now gone or renumbered. Keep each issue to a goal, a "done when" and a link to a README heading.
+- **One results topic first.** The slim replies topic saves broadcast egress only at fleet sizes stage 7 will measure; until then the edge can filter the results topic by a request ID header.
+- **Batcher consumer protocol (#24).** Prefer Kafka's consumer group protocol (KIP-848), so a rebalance leaves unaffected partitions processing. fs2-kafka 4.x folds transactional producing into `KafkaProducer`; #24's wording predates it.
+- **CDC without RabbitMQ.** TigerBeetle's `get_change_events` is not in the Java client, so a direct Kafka bridge needs another client or an upstream change. Only matters if a scan proves insufficient (README section 12, gap 4).
+- **Postgres CDC, for the record.** Since Postgres 13, `max_slot_wal_keep_size` caps the WAL a lagging slot retains, trading a full disk for an invalidated slot and a re-snapshot. The case against the Postgres hub in README section 13 stands.
+
 ## Related projects
 
 Projects that reuse the same discipline, ranked by fit:

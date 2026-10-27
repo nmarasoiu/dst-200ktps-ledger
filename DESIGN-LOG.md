@@ -23,10 +23,18 @@ Every decision in the [design notes](README.md) that was later corrected, what w
 | 17 | Network reversals routed through a lookup from network identifiers to `A` | The client key is derived from identifiers the reversal echoes, so `A` is computed directly | The lookup needs the authorization's result to be visible first, which brings back the ordering race the fence removed | [d7eef97] |
 | 18 | `exists` treated like `ok`, with the original result rebuilt by a lookup | `ok` is now `created`, and `exists` returns the original timestamp, so no lookup is needed | Checking the facts table against TigerBeetle's current source and its 0.17.0 API changes page | [d7eef97] |
 | 19 | A fence's `exists` results not told apart | Only `exists_with_different_flags` means the authorization holds `A`; any other `exists` result means an earlier fence holds it | Walking a cancel's fence meeting an earlier expiry fence while explaining fencing step by step | [d7eef97] |
+| 20 | Expiry lag of a second or two, from a practitioner report | About 100 ms: the primary injects an expiry pulse after a commit, or every 100 ms when idle, expiring up to 8,189 holds per pulse | Reading `pulse_timeout` and `commit_execute` in TigerBeetle's replica | |
+| 21 | CDC options unknown; auto-expired holds assumed invisible without a scan | Built-in CDC reports them as `two_phase_expired`, but only over AMQP | Reading TigerBeetle's CDC docs and source | |
+| 22 | Kafka's fencing of a zombie batcher's transaction taken as given | It holds only when offsets carry the consumer's live group metadata; fs2-kafka sends it | Reading Kafka's group coordinator (`validateOffsetCommit`) and fs2-kafka's producer | |
+| 23 | A replayed cancel repeats its result codes | It repeats its outcome; the void's code can change, because a void that failed with a transient error burns `V` | Walking each row of the fence table through TigerBeetle's source a second time, as a replay | |
+| 24 | "TigerBeetle is not the bottleneck" stated as settled | The premise to measure first, with the built-in benchmark; a third-party run leveled off near 107k TPS, and each authorization costs about two TigerBeetle events over its life | Looking for a source for the throughput figure and counting events per authorization | |
 
 ## Open
 
 - What to tell a client that reuses a key with a different payload (README section 12, follow-up 6).
+- An authorization replayed after its cancel is reported approved, because a voided authorization still returns `exists` (README section 12, follow-up 7). Found by checking whether `exists` reflects the hold's state.
+- Invariants stated over decisions rather than reasons (README section 12, follow-up 8).
+- Whether one TigerBeetle cluster has the headroom for this workload (README section 3).
 
 [88e1ed4]: https://github.com/nmarasoiu/dst-200ktps-ledger/commit/88e1ed4
 [f38b1ba]: https://github.com/nmarasoiu/dst-200ktps-ledger/commit/f38b1ba
