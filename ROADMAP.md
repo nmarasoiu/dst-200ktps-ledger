@@ -50,7 +50,7 @@ Prove the protocols, not just test them.
 
 Postgres as the complete audit log, and the accounting views on top of it.
 
-- Every command and outcome from the command log, and every ledger change from the tailer (README section 12, gap 4), each checked against the other. Expiries are derived from each hold's timestamp and timeout.
+- Every command and outcome from the command log, and every ledger change from the tailer, each checked against the other. The tailer is the offline checker's scan of every transfer by timestamp, run continuously and keeping its position (README section 12, gap 4). Expiries are derived from each hold's timestamp and timeout.
 - Exactly-once loading: each reader stores its position in the same Postgres transaction as the rows it writes, so a restart resumes where the last commit left off.
 - Time partitions, with older ones moved to cheaper storage. At the target rate the log grows by hundreds of GB a day (*estimate*), so "complete" means across Postgres and the archive.
 - A chart of accounts on top of TigerBeetle accounts.
@@ -92,7 +92,7 @@ Extract the stage 3 simulator into a reusable open-source library for the JVM, s
 Small items noticed in review. None blocks a stage; pick each up when its area is touched.
 
 - **Start the build small ([#8](https://github.com/nmarasoiu/dst-200ktps-ledger/issues/8)).** Begin with `core` and `sim`; add `checker`, `shell`, `contract-tests` and `loadgen` when their stage starts.
-- **Reconciler consumer protocol ([#24](https://github.com/nmarasoiu/dst-200ktps-ledger/issues/24)).** Prefer Kafka's consumer group protocol (KIP-848), so a rebalance leaves unaffected partitions processing. With the reconciler off the path to every answer, this only decides how soon stragglers get their outcomes.
+- **Resolver consumer protocol ([#24](https://github.com/nmarasoiu/dst-200ktps-ledger/issues/24)).** Prefer Kafka's consumer group protocol (KIP-848), so a rebalance leaves unaffected partitions processing. With the resolver off the path to every answer, this only decides how soon stragglers get their outcomes.
 - **TigerBeetle CDC.** Not needed: the tailer reads every transfer by timestamp through the Java client (README section 12, gap 4). Worth it only if expiries are wanted as records rather than derived. It publishes only over AMQP; Redpanda Connect's `tigerbeetle_cdc` input or the Go client's experimental `GetChangeEvents` would bring it to Kafka.
 - **Postgres CDC, for the record.** Since Postgres 13, `max_slot_wal_keep_size` caps the WAL a lagging slot retains, trading a full disk for an invalidated slot and a re-snapshot. The case against the Postgres hub in README section 13 stands.
 
