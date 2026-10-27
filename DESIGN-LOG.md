@@ -2,7 +2,7 @@
 
 Every decision in the [design notes](README.md) that was later corrected, what was wrong with it, and how the flaw was found. Most were found by one of four methods: re-reading the design against its own invariants, walking a concrete failure scenario step by step, checking a claim against its cited source, or reading the dependency's source code.
 
-| # | Before | After | How the flaw was found | Commit |
+| # | Before | After | How the flaw was found | Change |
 | --- | --- | --- | --- | --- |
 | 1 | Postgres as the hub, with CDC to TigerBeetle and back | Kafka as the intent log, TigerBeetle as the outcome store, Postgres as an async projection | Throughput arithmetic: one Postgres writer doing several writes per transaction at 200k TPS, with CDC slot lag able to stall the database | [88e1ed4] |
 | 2 | A Kafka Streams stage assigning time-ordered IDs, with 1 to 2 TB per day of dedupe state | The edge hashes the client key into the TigerBeetle ID; no ID stage and no state store | Cost of the state store and its restore time after failover, against a documented 10% throughput cost of random IDs | [f38b1ba] |
@@ -30,7 +30,7 @@ Every decision in the [design notes](README.md) that was later corrected, what w
 | 24 | "TigerBeetle is not the bottleneck" stated as settled | The premise to measure first, with the built-in benchmark; a third-party run leveled off near 107k TPS, and each authorization costs about two TigerBeetle events over its life | Looking for a source for the throughput figure and counting events per authorization | [3d76856] |
 | 25 | A caller could resend an authorization with the same key after a timeout and get the original outcome | After a non-definitive result the caller only cancels, until acknowledged; the acknowledgement is final and a new attempt uses a new key. Consumers never let a later approved override a cancel | Checking whether `exists` reflects the hold's state: a voided authorization still returns `exists`, and a resend landing just before the edge's cancel is approved and then voided | [a31fd58] |
 | 26 | Postgres projection fed by TigerBeetle change data capture | Fed by the results topic, with expiries derived from each hold's timestamp and timeout; the pipeline is TigerBeetle's only writer, and CDC is an optional audit feed | Asking how CDC would reach Kafka: it speaks only AMQP, while the results topic already records every change except expiries, which follow from what it records | [93dd4eb] |
-| 27 | A 200k TPS target, with TigerBeetle's single-cluster throughput the premise to measure first in stage 0 | 50k TPS, 75k under stress, or about 100k TigerBeetle events per second; one cluster is assumed to carry it, and stage 7 measures the whole pipeline | A scope decision rather than a flaw: the project's subject is crash safety and deterministic simulation, and measuring TigerBeetle's ceiling needs target-class hardware. TigerBeetle's homepage claims 100k to 500k TPS, so the load sits at the low end of that range | [6a84c87] |
+| 27 | A 200k TPS target, with TigerBeetle's single-cluster throughput the premise to measure first in stage 0 | 50k TPS, 75k under stress, or about 100k TigerBeetle events per second; one cluster is assumed to carry it, and stage 7 measures the whole pipeline | A scope decision rather than a flaw: the project's subject is crash safety and deterministic simulation, and measuring TigerBeetle's ceiling needs target-class hardware. TigerBeetle's homepage claims 100k to 500k TPS, so the load sits at the low end of that range | [#66] |
 
 ## Open
 
@@ -48,4 +48,4 @@ Every decision in the [design notes](README.md) that was later corrected, what w
 [3d76856]: https://github.com/nmarasoiu/dst-200ktps-ledger/commit/3d76856
 [a31fd58]: https://github.com/nmarasoiu/dst-200ktps-ledger/commit/a31fd58
 [93dd4eb]: https://github.com/nmarasoiu/dst-200ktps-ledger/commit/93dd4eb
-[6a84c87]: https://github.com/nmarasoiu/dst-200ktps-ledger/commit/6a84c87
+[#66]: https://github.com/nmarasoiu/dst-200ktps-ledger/pull/66
