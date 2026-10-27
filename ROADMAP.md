@@ -49,7 +49,7 @@ Prove the protocols, not just test them.
 
 - A chart of accounts on top of TigerBeetle accounts.
 - Statements, balance history, interest accrual and fees.
-- The Postgres projection fed by TigerBeetle change data capture, closing README section 12, gap 4.
+- The Postgres projection fed by the results topic, with expiries derived from each hold's timestamp and timeout (README section 12, gap 4), and balances reconciled against TigerBeetle.
 
 **Done when** statements reconcile with TigerBeetle balances at any point in time.
 
@@ -88,7 +88,7 @@ Small items noticed in review. None blocks a stage; pick each up when its area i
 - **Issue bodies drift.** They copy README details and cite follow-up numbers, which have already moved: #4, #12 and #33 point at follow-ups that are now gone or renumbered. Keep each issue to a goal, a "done when" and a link to a README heading.
 - **One results topic first.** The slim replies topic saves broadcast egress only at fleet sizes stage 7 will measure; until then the edge can filter the results topic by a request ID header.
 - **Batcher consumer protocol (#24).** Prefer Kafka's consumer group protocol (KIP-848), so a rebalance leaves unaffected partitions processing. fs2-kafka 4.x folds transactional producing into `KafkaProducer`; #24's wording predates it.
-- **CDC without RabbitMQ.** TigerBeetle's `get_change_events` is not in the Java client, so a direct Kafka bridge needs another client or an upstream change. Only matters if a scan proves insufficient (README section 12, gap 4).
+- **TigerBeetle CDC as an audit feed.** Not needed for the projection (README section 12, gap 4). Worth it only if something besides the pipeline writes to TigerBeetle, or as an independent record for the history checker (phase C). Two ways into Kafka, skipping RabbitMQ: Redpanda Connect's `tigerbeetle_cdc` input with a Kafka output (beta; cgo builds only; progress kept in an external cache; licence to check), or a small bridge of our own on the Go client's experimental `GetChangeEvents`, keeping its progress in Kafka itself. The Java client has only the operation code, not a method.
 - **Postgres CDC, for the record.** Since Postgres 13, `max_slot_wal_keep_size` caps the WAL a lagging slot retains, trading a full disk for an invalidated slot and a re-snapshot. The case against the Postgres hub in README section 13 stands.
 
 ## Related projects
