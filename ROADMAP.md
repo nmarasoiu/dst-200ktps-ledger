@@ -1,6 +1,6 @@
 # Roadmap beyond the core
 
-The [development stages](README.md#14-development-stages) 0 to 8 build and prove the authorization and cancel pipeline. The phases below extend it once that core holds. Each is tracked as a "Later" [milestone](https://github.com/nmarasoiu/dst-200ktps-ledger/milestones). They are listed by learning value; dependencies are noted where they exist.
+The [development stages](README.md#14-development-stages) 0 to 8 build and prove the authorization, cancel and capture pipeline. The phases below extend it once that core holds. Each is tracked as a "Later" [milestone](https://github.com/nmarasoiu/dst-200ktps-ledger/milestones). They are listed by learning value; dependencies are noted where they exist.
 
 Every phase follows the same rule as the core: new behavior gets invariants first, then the simulator, then real binaries.
 
@@ -8,7 +8,8 @@ Every phase follows the same rule as the core: new behavior gets invariants firs
 
 Complete what happens to a hold after authorization (README section 12, gap 3).
 
-- Capture and partial capture as posts of the pending transfer; incremental authorizations.
+- Multiple captures per hold, captures above the held amount (tips), and incremental authorizations. One full or partial capture per hold is already in the core (README section 8).
+- Holds longer than 7 days for merchant types that need them, such as hotels and car rental.
 - Reversals and advices that arrive with network identifiers, routed by computing `A` from the identifiers they echo, with no lookup.
 - Forced holds for stand-in approvals, which may exceed the balance. Each gets its own ID; the timed-out authorization is still cancelled.
 - Refunds and chargebacks as new transfers linked to the original.
