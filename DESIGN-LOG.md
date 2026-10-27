@@ -28,11 +28,11 @@ Every decision in the [design notes](README.md) that was later corrected, what w
 | 22 | Kafka's fencing of a zombie batcher's transaction taken as given | It holds only when offsets carry the consumer's live group metadata; fs2-kafka sends it | Reading Kafka's group coordinator (`validateOffsetCommit`) and fs2-kafka's producer | [3d76856] |
 | 23 | A replayed cancel repeats its result codes | It repeats its outcome; the void's code can change, because a void that failed with a transient error burns `V` | Walking each row of the fence table through TigerBeetle's source a second time, as a replay | [3d76856] |
 | 24 | "TigerBeetle is not the bottleneck" stated as settled | The premise to measure first, with the built-in benchmark; a third-party run leveled off near 107k TPS, and each authorization costs about two TigerBeetle events over its life | Looking for a source for the throughput figure and counting events per authorization | [3d76856] |
+| 25 | A caller could resend an authorization with the same key after a timeout and get the original outcome | After a non-definitive result the caller only cancels, until acknowledged; the acknowledgement is final and a new attempt uses a new key. Consumers never let a later approved override a cancel | Checking whether `exists` reflects the hold's state: a voided authorization still returns `exists`, and a resend landing just before the edge's cancel is approved and then voided | |
 
 ## Open
 
 - What to tell a client that reuses a key with a different payload (README section 12, follow-up 6).
-- A same-key authorization around a cancel can be reported approved while its hold is released: after the cancel, because a voided authorization still returns `exists`; just before it, because the cancel then voids it (README section 12, follow-up 7). Found by checking whether `exists` reflects the hold's state, then walking the retry on both sides of the cancel.
 - Invariants stated over decisions rather than reasons (README section 12, follow-up 8).
 - Whether one TigerBeetle cluster has the headroom for this workload (README section 3).
 
