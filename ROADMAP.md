@@ -55,7 +55,7 @@ Prove the protocols, not just test them.
 
 ## F. Real-time risk checks
 
-- Velocity and spending-pattern checks at 200k TPS.
+- Velocity and spending-pattern checks at 50k TPS.
 - A decision on which checks run before TigerBeetle, inside the 1.5 s budget, and which run after.
 - Check results recorded in the results topic for audit.
 
