@@ -32,7 +32,7 @@ Go beyond one cluster's throughput.
 Prove the protocols, not just test them.
 
 - A TLA+ or P model of fence-then-void and of replay-safe expiry, model-checked against the README invariants.
-- A Jepsen-style history checker that records what every client saw and checks it against the ledger.
+- A Jepsen-style history checker. Stage 6 already records what the workload driver was told and checks it against the ledger with the stage 1 invariants; what a checker such as Elle would add beyond that is to decide.
 - The same model extended to the cross-shard protocol of phase B.
 
 **Done when** the model checker finds the planted bugs of stage 3 and passes the real design.
@@ -78,6 +78,7 @@ Extract the stage 3 simulator into a reusable open-source library for the JVM, s
 - A seeded scheduler, simulated clock and fault injection, independent of this ledger.
 - Simulated Kafka and TigerBeetle adapters as optional modules.
 - The ledger as the first user and the main example.
+- Compare first with OpenDST and Fray, which schedule real JVM threads deterministically (README section 15). Either could one day run the real shell under simulation, closing the gap that two interpreters leave.
 
 **Depends on** stage 3. **Done when** a second, unrelated project uses it.
 
@@ -85,9 +86,9 @@ Extract the stage 3 simulator into a reusable open-source library for the JVM, s
 
 Small items noticed in review. None blocks a stage; pick each up when its area is touched.
 
-- **Start the build small (#8).** Begin with `core` and `sim`; add `checker`, `shell`, `contract-tests` and `loadgen` when their stage starts.
+- **Start the build small ([#8](https://github.com/nmarasoiu/dst-200ktps-ledger/issues/8)).** Begin with `core` and `sim`; add `checker`, `shell`, `contract-tests` and `loadgen` when their stage starts.
 - **One results topic first.** The slim replies topic saves broadcast egress only at fleet sizes stage 7 will measure; until then the edge can filter the results topic by a request ID header.
-- **Batcher consumer protocol (#24).** Prefer Kafka's consumer group protocol (KIP-848), so a rebalance leaves unaffected partitions processing. fs2-kafka 4.x folds transactional producing into `KafkaProducer`; #24's wording predates it.
+- **Batcher consumer protocol ([#24](https://github.com/nmarasoiu/dst-200ktps-ledger/issues/24)).** Prefer Kafka's consumer group protocol (KIP-848), so a rebalance leaves unaffected partitions processing. fs2-kafka 4.x folds transactional producing into `KafkaProducer`.
 - **TigerBeetle CDC as an audit feed.** Not needed for the projection (README section 12, gap 4). Worth it only if something besides the pipeline writes to TigerBeetle, or as an independent record for the history checker (phase C). Two ways into Kafka, skipping RabbitMQ: Redpanda Connect's `tigerbeetle_cdc` input with a Kafka output (beta; cgo builds only; progress kept in an external cache; licence to check), or a small bridge of our own on the Go client's experimental `GetChangeEvents`, keeping its progress in Kafka itself. The Java client has only the operation code, not a method.
 - **Postgres CDC, for the record.** Since Postgres 13, `max_slot_wal_keep_size` caps the WAL a lagging slot retains, trading a full disk for an invalidated slot and a re-snapshot. The case against the Postgres hub in README section 13 stands.
 
