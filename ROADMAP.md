@@ -9,8 +9,8 @@ Every phase follows the same rule as the core: new behavior gets invariants firs
 Complete what happens to a hold after authorization (README section 12, gap 3).
 
 - Capture and partial capture as posts of the pending transfer; incremental authorizations.
-- Reversals and advices that arrive with network identifiers, routed through a lookup from network identifiers to `A`.
-- Forced holds for stand-in approvals, which may exceed the balance.
+- Reversals and advices that arrive with network identifiers, routed by computing `A` from the identifiers they echo, with no lookup.
+- Forced holds for stand-in approvals, which may exceed the balance. Each gets its own ID; the timed-out authorization is still cancelled.
 - Refunds and chargebacks as new transfers linked to the original.
 - End-of-day clearing files and reconciliation against the network's settlement.
 

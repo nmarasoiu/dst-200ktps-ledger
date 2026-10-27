@@ -18,6 +18,11 @@ Every decision in the [design notes](README.md) that was later corrected, what w
 | 12 | Hedged submission rejected because it breaks void ordering | Safe with fenced cancels; deferred only for the extra TigerBeetle load | Follows from #9 | [ce4e8d6] |
 | 13 | Fence behavior assumed from documentation and memory | Verified in TigerBeetle's source: the ID check runs first, flags are compared first, zero-amount transfers are allowed. The fence and the void must not be linked, and no lookup is needed to recognize a fence | Reading `create_transfer`, `create_transfer_exists` and `post_or_void_pending_transfer` in the TigerBeetle source | [6c82771] |
 | 14 | Separate `expired` and `cancelled` outcomes for a fenced authorization | One outcome, `not_executed` | Re-reading against the invariants: a retried copy of an expired authorization would find the fence and be reported `cancelled`, giving one request two outcomes | [06eced4] |
+| 15 | Correctness after a rebalance credited to Kafka's transactional fencing and TigerBeetle idempotency | Kafka's fencing stops only a zombie batcher's Kafka writes; the fence makes its TigerBeetle calls harmless. Added to the crash table | Listing every actor that can create `A` against every actor that decides `A` must never exist | [d7eef97] |
+| 16 | Stand-in exception: the caller must not cancel after a stand-in | No exception: the timed-out authorization is always cancelled, and the stand-in is a new forced hold with its own ID | The edge cancels on its own timeout anyway; and if neither cancels and `A` went through, `A`'s hold and the forced hold hold the money twice | [d7eef97] |
+| 17 | Network reversals routed through a lookup from network identifiers to `A` | The client key is derived from identifiers the reversal echoes, so `A` is computed directly | The lookup needs the authorization's result to be visible first, which brings back the ordering race the fence removed | [d7eef97] |
+| 18 | `exists` treated like `ok`, with the original result rebuilt by a lookup | `ok` is now `created`, and `exists` returns the original timestamp, so no lookup is needed | Checking the facts table against TigerBeetle's current source and its 0.17.0 API changes page | [d7eef97] |
+| 19 | A fence's `exists` results not told apart | Only `exists_with_different_flags` means the authorization holds `A`; any other `exists` result means an earlier fence holds it | Walking a cancel's fence meeting an earlier expiry fence while explaining fencing step by step | [d7eef97] |
 
 ## Open
 
@@ -30,3 +35,4 @@ Every decision in the [design notes](README.md) that was later corrected, what w
 [ce4e8d6]: https://github.com/nmarasoiu/dst-200ktps-ledger/commit/ce4e8d6
 [6c82771]: https://github.com/nmarasoiu/dst-200ktps-ledger/commit/6c82771
 [06eced4]: https://github.com/nmarasoiu/dst-200ktps-ledger/commit/06eced4
+[d7eef97]: https://github.com/nmarasoiu/dst-200ktps-ledger/commit/d7eef97
