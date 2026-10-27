@@ -32,7 +32,7 @@ Every decision in the [design notes](README.md) that was later corrected, what w
 ## Open
 
 - What to tell a client that reuses a key with a different payload (README section 12, follow-up 6).
-- An authorization replayed after its cancel is reported approved, because a voided authorization still returns `exists` (README section 12, follow-up 7). Found by checking whether `exists` reflects the hold's state.
+- A same-key authorization around a cancel can be reported approved while its hold is released: after the cancel, because a voided authorization still returns `exists`; just before it, because the cancel then voids it (README section 12, follow-up 7). Found by checking whether `exists` reflects the hold's state, then walking the retry on both sides of the cancel.
 - Invariants stated over decisions rather than reasons (README section 12, follow-up 8).
 - Whether one TigerBeetle cluster has the headroom for this workload (README section 3).
 
