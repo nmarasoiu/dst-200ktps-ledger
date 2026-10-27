@@ -1,6 +1,6 @@
 # Roadmap beyond the core
 
-The [development stages](README.md#14-development-stages) 0 to 8 build and prove the authorization, cancel and capture pipeline. The phases below extend it once that core holds. Each is tracked as a "Later" [milestone](https://github.com/nmarasoiu/dst-200ktps-ledger/milestones). They are listed by learning value; dependencies are noted where they exist.
+The [development stages](README.md#14-development-stages) 0 to 7 build and prove the authorization, cancel and capture pipeline. The phases below extend it once that core holds. Each is tracked as a "Later" [milestone](https://github.com/nmarasoiu/dst-200ktps-ledger/milestones). They are listed by learning value; dependencies are noted where they exist.
 
 Every phase follows the same rule as the core: new behavior gets invariants first, then the simulator, then real binaries.
 
@@ -32,7 +32,7 @@ Go beyond one cluster's throughput.
 Prove the protocols, not just test them.
 
 - A TLA+ or P model of fence-then-void and of replay-safe expiry, model-checked against the README invariants.
-- A Jepsen-style checker for balance reads. Stage 6 already checks what the workload driver was told about its own requests; this checks that every balance a caller reads is explained by some order of the transfers the ledger applied. It needs the pipeline to serve reads, from TigerBeetle or from the projection of phase E. Jepsen's Elle is the reference.
+- A Jepsen-style checker for balance reads. Stage 6 already checks what the workload driver was told about its own requests; this checks that every balance a caller reads is explained by some order of the transfers the ledger applied. It needs the pipeline to serve reads, from TigerBeetle or from the Postgres audit log of phase E. Jepsen's Elle is the reference.
 - The same model extended to the cross-shard protocol of phase B.
 
 **Done when** the model checker finds the planted bugs of stage 3 and passes the real design.
@@ -48,17 +48,21 @@ Prove the protocols, not just test them.
 
 ## E. Accounting views
 
+Postgres as the complete audit log, and the accounting views on top of it.
+
+- Every command and outcome from the command log, and every ledger change from the tailer (README section 12, gap 4), each checked against the other. Expiries are derived from each hold's timestamp and timeout.
+- Exactly-once loading: each reader stores its position in the same Postgres transaction as the rows it writes, so a restart resumes where the last commit left off.
+- Time partitions, with older ones moved to cheaper storage. At the target rate the log grows by hundreds of GB a day (*estimate*), so "complete" means across Postgres and the archive.
 - A chart of accounts on top of TigerBeetle accounts.
 - Statements, balance history, interest accrual and fees.
-- The Postgres projection fed by the results topic, with expiries derived from each hold's timestamp and timeout (README section 12, gap 4), and balances reconciled against TigerBeetle.
 
-**Done when** statements reconcile with TigerBeetle balances at any point in time.
+**Done when** the audit log's two sources agree, and statements reconcile with TigerBeetle balances at any point in time.
 
 ## F. Real-time risk checks
 
 - Velocity and spending-pattern checks at 50k TPS.
 - A decision on which checks run before TigerBeetle, inside the 1.5 s budget, and which run after.
-- Check results recorded in the results topic for audit.
+- Check results recorded in the command log for audit.
 
 **Done when** the checks fit the latency budget measured in stage 7.
 
@@ -68,8 +72,9 @@ Prove the protocols, not just test them.
 - Upgrades without downtime, including a live switch from hashed to time-ordered IDs.
 - Safe evolution of message formats.
 - Privacy erasure against an immutable ledger, using encrypted personal data whose keys can be deleted.
+- Chaos in a Kubernetes staging cluster with Chaos Mesh or LitmusChaos, moved from stage 8: pod and node kills, partitions, I/O delay, CPU pressure and clock skew. Antithesis is optional.
 
-**Done when** a region failover and a live upgrade both pass the offline checker.
+**Done when** a region failover, a live upgrade and scheduled chaos runs all pass the offline checker.
 
 ## H. Deterministic simulation library
 
@@ -87,9 +92,8 @@ Extract the stage 3 simulator into a reusable open-source library for the JVM, s
 Small items noticed in review. None blocks a stage; pick each up when its area is touched.
 
 - **Start the build small ([#8](https://github.com/nmarasoiu/dst-200ktps-ledger/issues/8)).** Begin with `core` and `sim`; add `checker`, `shell`, `contract-tests` and `loadgen` when their stage starts.
-- **One results topic first.** The slim replies topic saves broadcast egress only at fleet sizes stage 7 will measure; until then the edge can filter the results topic by a request ID header.
-- **Batcher consumer protocol ([#24](https://github.com/nmarasoiu/dst-200ktps-ledger/issues/24)).** Prefer Kafka's consumer group protocol (KIP-848), so a rebalance leaves unaffected partitions processing.
-- **TigerBeetle CDC as an audit feed.** Not needed for the projection (README section 12, gap 4). Worth it only if something besides the pipeline writes to TigerBeetle, or as an independent record for the history checker (phase C). Two ways into Kafka, skipping RabbitMQ: Redpanda Connect's `tigerbeetle_cdc` input with a Kafka output (beta; cgo builds only; progress kept in an external cache; licence to check), or a small bridge of our own on the Go client's experimental `GetChangeEvents`, keeping its progress in Kafka itself. The Java client has only the operation code, not a method.
+- **Reconciler consumer protocol ([#24](https://github.com/nmarasoiu/dst-200ktps-ledger/issues/24)).** Prefer Kafka's consumer group protocol (KIP-848), so a rebalance leaves unaffected partitions processing. With the reconciler off the path to every answer, this only decides how soon stragglers get their outcomes.
+- **TigerBeetle CDC.** Not needed: the tailer reads every transfer by timestamp through the Java client (README section 12, gap 4). Worth it only if expiries are wanted as records rather than derived. It publishes only over AMQP; Redpanda Connect's `tigerbeetle_cdc` input or the Go client's experimental `GetChangeEvents` would bring it to Kafka.
 - **Postgres CDC, for the record.** Since Postgres 13, `max_slot_wal_keep_size` caps the WAL a lagging slot retains, trading a full disk for an invalidated slot and a re-snapshot. The case against the Postgres hub in README section 13 stands.
 
 ## Related projects

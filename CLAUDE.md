@@ -6,8 +6,8 @@ This repo is a design held in three documents and in GitHub issues; code starts 
 
 - **README.md is the spec.** Change it first.
 - **DESIGN-LOG.md** gets an entry whenever a change corrects, reverses or rescopes an earlier decision: what it was, what it is now, and how the flaw was found.
-- **ROADMAP.md** holds the phases after stage 8 and a parking lot of small items.
-- **Issues** track the work: one milestone per development stage (0 to 8) and one per roadmap phase ("Later A" to "Later H"). After a design change, update every issue it affects.
+- **ROADMAP.md** holds the phases after stage 7 and a parking lot of small items.
+- **Issues** track the work: one milestone per development stage (0 to 7; stage 8 moved to phase G) and one per roadmap phase ("Later A" to "Later H"). After a design change, update every issue it affects.
 
 ## Git
 
