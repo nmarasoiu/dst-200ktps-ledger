@@ -29,7 +29,7 @@ Every decision in the [design notes](README.md) that was later corrected, what w
 | 23 | A replayed cancel repeats its result codes | It repeats its outcome; the void's code can change, because a void that failed with a transient error burns `V` | Walking each row of the fence table through TigerBeetle's source a second time, as a replay | [3d76856] |
 | 24 | "TigerBeetle is not the bottleneck" stated as settled | The premise to measure first, with the built-in benchmark; a third-party run leveled off near 107k TPS, and each authorization costs about two TigerBeetle events over its life | Looking for a source for the throughput figure and counting events per authorization | [3d76856] |
 | 25 | A caller could resend an authorization with the same key after a timeout and get the original outcome | After a non-definitive result the caller only cancels, until acknowledged; the acknowledgement is final and a new attempt uses a new key. Consumers never let a later approved override a cancel | Checking whether `exists` reflects the hold's state: a voided authorization still returns `exists`, and a resend landing just before the edge's cancel is approved and then voided | [a31fd58] |
-| 26 | Postgres projection fed by TigerBeetle change data capture | Fed by the results topic, with expiries derived from each hold's timestamp and timeout; the pipeline is TigerBeetle's only writer, and CDC is an optional audit feed | Asking how CDC would reach Kafka: it speaks only AMQP, while the results topic already records every change except expiries, which follow from what it records | |
+| 26 | Postgres projection fed by TigerBeetle change data capture | Fed by the results topic, with expiries derived from each hold's timestamp and timeout; the pipeline is TigerBeetle's only writer, and CDC is an optional audit feed | Asking how CDC would reach Kafka: it speaks only AMQP, while the results topic already records every change except expiries, which follow from what it records | [f36ddc9] |
 
 ## Open
 
@@ -47,3 +47,4 @@ Every decision in the [design notes](README.md) that was later corrected, what w
 [d7eef97]: https://github.com/nmarasoiu/dst-200ktps-ledger/commit/d7eef97
 [3d76856]: https://github.com/nmarasoiu/dst-200ktps-ledger/commit/3d76856
 [a31fd58]: https://github.com/nmarasoiu/dst-200ktps-ledger/commit/a31fd58
+[f36ddc9]: https://github.com/nmarasoiu/dst-200ktps-ledger/commit/f36ddc9
