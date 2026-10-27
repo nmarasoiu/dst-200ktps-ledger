@@ -2,7 +2,7 @@
 
 *As of 2026-10-27 · Dumitru Nicolae Marasoiu*
 
-A hobby design for a card-authorization ledger pipeline that sustains 200,000 transactions per second (TPS), stays correct under crash-stop failures, and is proven correct mainly by deterministic simulation and fault injection. It serves as the starting functional spec, non-functional spec and design for an implementation in Scala 3 with Cats Effect.
+A hobby design for a card-authorization ledger pipeline that sustains 50,000 transactions per second (TPS), stays correct under crash-stop failures, and is proven correct mainly by deterministic simulation and fault injection. It serves as the starting functional spec, non-functional spec and design for an implementation in Scala 3 with Cats Effect.
 
 **Also in this repo:** [DESIGN-LOG.md](DESIGN-LOG.md) records every decision that was corrected and how the flaw was found; [ROADMAP.md](ROADMAP.md) lists the phases beyond the core.
 
@@ -14,7 +14,7 @@ A hobby design for a card-authorization ledger pipeline that sustains 200,000 tr
 
 - **Domain:** card-authorization-style debits. The issuer must answer within a hard deadline; holds (pending amounts) are later posted or voided.
 - **Setting:** a hypothetical core-banking platform serving a large bank. Clients may be async-capable or may insist on a synchronous call.
-- **Rate:** 200k TPS as an average over a 1-minute window, with 300k TPS as the stress scenario. Sub-second bursts of 2 to 3 times that are absorbed by queues (*estimate*).
+- **Rate:** 50k TPS as an average over a 1-minute window, with 75k TPS as the stress scenario. Sub-second bursts of 2 to 3 times that are absorbed by queues (*estimate*). Each authorization costs TigerBeetle about two events over its life, so 50k TPS means about 100k TigerBeetle events per second (section 3).
 - **Deadline:** the ledger answers within **1.5 s**, inside the bank's 2 to 3 s card-network budget. A "timed out" answer is acceptable and does not count toward SLA penalties.
 - **Correctness bar:** no double debit, no lost result, a deterministic outcome for every request, and safe cancellation of any request the caller got no definitive answer for, so that a "timed out" reply never leaves money held, even when any process crashes at any point.
 - **Building blocks:** Kafka (logs), TigerBeetle (ledger and money invariants), Postgres (queryable projection, off the hot path).
@@ -32,13 +32,13 @@ Each stage does one clear thing against one clear store, commits its progress, a
 7. **Count the couplings.** Three systems at 99.99% each give about 99.97% combined; removing a system beats tuning one.
 8. **Functional core, imperative shell.** Money logic is pure state machines; effects live in a thin shell. This is what makes deterministic simulation possible (section 11).
 
-## 3. From 200k TPS to the architecture
+## 3. From 50k TPS to the architecture
 
 The throughput target alone forces Postgres off the hot path and makes batching mandatory.
 
-1. At 200k to 300k TPS, one-by-one processing is impossible at every stage, so **batching is mandatory**.
-2. **TigerBeetle should not be the bottleneck; this is the premise to measure first.** It processes batches of up to 8,189 transfers, runs single-core with a single leader by design ([Performance](https://docs.tigerbeetle.com/concepts/performance/)), and is believed to sustain roughly 100k to 500k TPS on one cluster (*recollection, verify*: TigerBeetle's docs give no TPS figure). One third-party cloud benchmark leveled off near 107k TPS on three 4-vCPU replicas with hot accounts, with its batching and ID order unstated ([SoftwareMill](https://softwaremill.com/tigetbeetle-vs-postgresql-performance-benchmark-harness-cloud-tests)). Each authorization also costs TigerBeetle about two events over its life: the hold, then its post, void or expiry. At 200k TPS it runs nearer its ceiling than its makers recommend; if one cluster lacks the headroom, sharding ([ROADMAP](ROADMAP.md) phase B) moves into the core.
-3. **A single Postgres writer** doing several writes per transaction is very likely over its comfortable limit (*estimate*).
+1. At 50k to 75k TPS, one-by-one processing is impractical at every stage, so **batching is mandatory**.
+2. **TigerBeetle is assumed not to be the bottleneck, and is not measured on its own.** It processes batches of up to 8,189 transfers and runs single-core with a single leader by design ([Performance](https://docs.tigerbeetle.com/concepts/performance/)). Each authorization costs it about two events over its life: the hold, then its post, void or expiry; a cancel costs two, its fence and its void. At 50k TPS that is about 100k events per second, and about 150k under stress. TigerBeetle's homepage claims 100k to 500k TPS ([tigerbeetle.com](https://tigerbeetle.com/)), though its docs give no figure, and one third-party cloud benchmark leveled off near 107k TPS on three 4-vCPU replicas with hot accounts, with its batching and ID order unstated ([SoftwareMill](https://softwaremill.com/tigetbeetle-vs-postgresql-performance-benchmark-harness-cloud-tests)). So the load sits at the low end of the claimed range, and the headroom depends on hardware. Stage 7 measures the whole pipeline; if TigerBeetle turns out to be its ceiling, sharding ([ROADMAP](ROADMAP.md) phase B) moves into the core.
+3. **A single Postgres writer** doing several writes per transaction, 150k to 250k row writes per second at 50k TPS, is likely near or past its comfortable limit (*estimate*).
 4. If Postgres stayed on the hot path, CDC from its WAL would be the cheapest way out. But at the limit, CDC is fragile: a lagging consumer forces WAL retention, which can fill disk and stall the database.
 5. **Conclusion:** demote Postgres to an async projection. Kafka is the durable intent log; TigerBeetle is the durable outcome and invariant enforcer.
 
@@ -127,6 +127,7 @@ Every crash point resolves to a replay that produces the same outcome.
 | `exists` should be handled exactly like `created` for crash recovery | Verified | [create_transfers](https://docs.tigerbeetle.com/reference/requests/create_transfers/) |
 | Since 0.17.0 every event gets a status and a timestamp; `ok` is renamed `created`, and `exists` returns the original timestamp | Verified | [API changes](https://docs.tigerbeetle.com/coding/api-changes/), [source](https://github.com/tigerbeetle/tigerbeetle/blob/main/src/tigerbeetle.zig) |
 | Batches of up to 8,189 transfers; single core, single leader | Verified | [Requests](https://docs.tigerbeetle.com/coding/requests/), [Performance](https://docs.tigerbeetle.com/concepts/performance/) |
+| TigerBeetle claims 100k to 500k TPS; its docs give no figure | Verified as a vendor claim on its homepage; for this workload, assumed rather than measured (section 3) | [tigerbeetle.com](https://tigerbeetle.com/) |
 | The built-in `tigerbeetle benchmark` can model this workload: pending transfers, random IDs, Zipfian account choice, several clients | Verified in source | [source](https://github.com/tigerbeetle/tigerbeetle/blob/main/src/tigerbeetle/cli.zig) (`Benchmark`) |
 | Random IDs give about 10% lower throughput than strictly increasing IDs | Verified | [Data modeling](https://docs.tigerbeetle.com/design/data-modeling/) |
 | Java client is thread-safe; one shared instance batches concurrent events | Verified | [Java client](https://docs.tigerbeetle.com/coding/clients/java/) |
@@ -150,7 +151,7 @@ The mapping from a client key to a TigerBeetle ID sits behind one interface, so 
 - **The hash is permanent.** A cancel recomputes `A` from the client key, so changing the hash function or how its inputs are encoded would aim the cancels of existing holds at the wrong ID. Fix it once in stage 1: a cryptographic hash truncated to 128 bits, over length-prefixed fields with a tag per ID kind, so no client key can encode to the input of a void ID, and never 0 or the maximum value, which TigerBeetle rejects.
 - **Retry contract:** once an ID fails with a transient error or is voided, it can never succeed again. (Validation errors are not recorded, so an ID rejected for those could succeed if resent with corrected fields; with hashed IDs and unchanged fields this does not arise.) A client never resends an authorization after a non-definitive result: it cancels, and a genuinely new attempt uses a new key (section 8). Reusing a key is left to the system itself, when a batcher replays after a crash or the network duplicates a send.
 - **Cancel IDs:** a cancel's fence reuses `A` itself, and its void gets the fixed ID `V = hash(A, "void")`, so cancels are idempotent too.
-- **Winning back the ~10%:** switch to time-ordered IDs behind the same interface. Either clients supply ULIDs or TigerBeetle-style time-based IDs, or a mapping layer assigns one on first sight of each client key (a Kafka Streams stage with a state store, or DynamoDB with conditional puts). The mapping layer brings back a state store, restore time after failover, and roughly 1 to 2 TB of dedupe state per day at 200k TPS (*estimate*), which is why it is not the default.
+- **Winning back the ~10%:** switch to time-ordered IDs behind the same interface. Either clients supply ULIDs or TigerBeetle-style time-based IDs, or a mapping layer assigns one on first sight of each client key (a Kafka Streams stage with a state store, or DynamoDB with conditional puts). The mapping layer brings back a state store, restore time after failover, and roughly 0.25 to 0.5 TB of dedupe state per day at 50k TPS (*estimate*), which is why it is not the default.
 - **Rejected:** IDs derived from Kafka partition and offset. They would need the offset of the key's first occurrence, which requires a state store anyway.
 
 ## 8. Deadlines, cancels and failover
@@ -226,13 +227,13 @@ Expiry by clock reading is not replay-safe. A batcher that submits `A` at 1.1 s,
 
 ## 9. Reply routing
 
-Start with broadcast over a slim replies topic; switch to reply addressing only if the edge fleet grows past about 50 instances.
+Start with broadcast over a slim replies topic; switch to reply addressing only if the edge fleet grows past about 200 instances, many times what 50k TPS needs (*estimate*).
 
 - **The problem:** the authorization ID decides where work is processed, but the load balancer decides which edge instance holds the TCP or QUIC connection. The result must cross from one mapping to the other.
 - **Best-effort by design:** results are durable, and deadlines plus cancels keep the ledger consistent. A lost reply is a timeout, not a correctness failure.
-- **Edge waiter table:** an in-memory map from request ID to waiting connection, each entry expiring at the deadline. The whole fleet holds at most about 300k entries at 200k TPS and 1.5 s.
+- **Edge waiter table:** an in-memory map from request ID to waiting connection, each entry expiring at the deadline. The whole fleet holds at most about 75k entries at 50k TPS and 1.5 s.
 - **Chosen: broadcast.** Every edge instance reads the slim replies topic (request ID, outcome code, amount) and completes only its own waiters. The request ID sits in the record key or a header, so non-matching records are skipped without parsing.
-- **Cost model:** broker egress = N instances × 200k/s × message size. At about 50 B per reply, that is about 10 MB/s per instance and about 1 GB/s for 100 instances. The lookup costs tens of nanoseconds; consumer work is an estimated fraction of a core per instance.
+- **Cost model:** broker egress = N instances × 50k/s × message size. At about 50 B per reply, that is about 2.5 MB/s per instance and about 250 MB/s for 100 instances. The lookup costs tens of nanoseconds; consumer work is an estimated fraction of a core per instance.
 - **Upgrade path:** the edge stamps a reply address on each request, and a dispatcher forwards results to a per-instance replies partition (stable instance identity, such as a StatefulSet ordinal) or by direct RPC. The switch does not touch the core pipeline.
 - **Rejected:** moving the connection to the partition owner. The edge would have to track Kafka assignments through every rebalance.
 - **Failures stay benign:** a dead edge instance takes its connections with it, so its replies are discarded; a lagging consumer delivers late replies that are dropped.
@@ -312,7 +313,7 @@ These are open in the functional and non-functional spec.
 | Kafka Streams stage assigning time-ordered IDs | State store, restore time and dedupe-window sizing; kept only as the way to win back TigerBeetle's ~10% |
 | Redis as idempotency map | Weaker durability for a correctness-critical mapping |
 | Postgres LISTEN/NOTIFY to wake waiting requests | NOTIFY adds commit contention at high throughput |
-| Reply addressing (per-instance partitions or direct RPC) | Not needed below about 50 edge instances; kept as the upgrade path from broadcast |
+| Reply addressing (per-instance partitions or direct RPC) | Not needed below about 200 edge instances; kept as the upgrade path from broadcast |
 | Hedged submission via a second consumer group | Safe with fenced cancels, but can double TigerBeetle load; deferred |
 | Ordered voids instead of fenced cancels (same partition, same producer, void after the authorization's send completes) | Breaks when a crashed edge's stale send lands after a cancel from another instance |
 | Ledger-side sweeper for unanswered requests | Cannot tell a lost reply from a delivered one; would void holds the caller believes approved |
@@ -326,14 +327,14 @@ Each stage checks the assumptions the next one builds on: the simulator encodes 
 
 | Stage | Goal | Done when |
 | --- | --- | --- |
-| 0. Fact spike | Source reading and throwaway scripts against single-node TigerBeetle and local Kafka. The fence, expiry, CDC and Kafka fencing facts are verified in source; open is the throughput figure, a run of `tigerbeetle benchmark` on target-class hardware. Card-network behavior needs scheme specifications and blocks only the card lifecycle | Every TigerBeetle and Kafka fact in section 6 is verified or refuted |
+| 0. Fact spike | Source reading and throwaway scripts against single-node TigerBeetle and local Kafka. The fence, expiry, CDC and Kafka fencing facts are verified in source; TigerBeetle's throughput is assumed, not measured (section 3). Card-network behavior needs scheme specifications and blocks only the card lifecycle | Every TigerBeetle and Kafka fact in section 6 is verified or refuted. *Done* |
 | 1. Spec as code | Domain types (commands, outcomes, rejection reasons, routing key) and the invariants of section 11 as predicates over an event history; scope is authorization and cancel only | Invariants compile and fail on hand-written bad histories |
 | 2. Pure core | State machines for the batcher, edge waiter and admission control, fenced cancels and replay-safe expiry; no effects | Property tests pass per machine |
 | 3. Deterministic simulator | Seeded event loop with simulated Kafka and TigerBeetle that behave as stage 0 found | Millions of seeds pass, failures replay by seed, and planted bugs are caught |
 | 4. Contract tests | One suite run against both the simulators and the real binaries | Green on both in CI |
 | 5. Cats Effect shell | fs2-kafka, the TigerBeetle client wrapped in `IO`, the http4s edge; TestControl shell tests | End to end on a laptop at low rate, surviving manual kills of any process |
 | 6. Offline checker and Toxiproxy | A tool that reads the topics and TigerBeetle after a run and checks the same invariants; network fault scenarios in CI | Scripted network faults pass the checker |
-| 7. Performance | Load generator stepping 20k, 100k, 200k and 300k TPS; per-stage latency, broadcast egress, partition counts, admission control under real load | 200k TPS with p99 inside 1.5 s, or a known ceiling and its cause |
+| 7. Performance | Load generator stepping 10k, 25k, 50k and 75k TPS; per-stage latency, broadcast egress, partition counts, admission control under real load | 50k TPS with p99 inside 1.5 s, or a known ceiling and its cause |
 | 8. Cluster chaos | Chaos Mesh in a Kubernetes staging cluster; Antithesis optional | The checker stays green across scheduled chaos runs |
 
 - **One set of invariants for every stage.** They are defined once in stage 1 and checked by the simulator, the contract tests, the offline checker and the chaos runs.
