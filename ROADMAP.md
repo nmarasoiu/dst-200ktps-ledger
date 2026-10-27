@@ -32,7 +32,7 @@ Go beyond one cluster's throughput.
 Prove the protocols, not just test them.
 
 - A TLA+ or P model of fence-then-void and of replay-safe expiry, model-checked against the README invariants.
-- A Jepsen-style history checker. Stage 6 already records what the workload driver was told and checks it against the ledger with the stage 1 invariants; what a checker such as Elle would add beyond that is to decide.
+- A Jepsen-style checker for balance reads. Stage 6 already checks what the workload driver was told about its own requests; this checks that every balance a caller reads is explained by some order of the transfers the ledger applied. It needs the pipeline to serve reads, from TigerBeetle or from the projection of phase E. Jepsen's Elle is the reference.
 - The same model extended to the cross-shard protocol of phase B.
 
 **Done when** the model checker finds the planted bugs of stage 3 and passes the real design.
