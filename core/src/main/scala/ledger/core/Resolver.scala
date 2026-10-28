@@ -3,6 +3,16 @@ package ledger.core
 import scala.collection.immutable.SortedMap
 import scala.concurrent.duration.FiniteDuration
 
+/** One assignment of a partition to the resolver. Results tagged with an older one, from before a rebalance, are
+  * dropped. An opaque `Long`: stored as a primitive, and never mistaken for an offset or a time.
+  */
+opaque type Generation = Long
+
+object Generation:
+  val Initial: Generation = 0L
+  def apply(n: Long): Generation = n
+  extension (g: Generation) def next: Generation = g + 1
+
 /** The resolver on one assigned partition of the command log (README section 8, resolver). It gives an outcome to
   * every command still without one a grace period after its deadline, judged in log time; it fences an
   * authorization and resubmits a cancel or a capture. It never submits an authorization, and it commits offsets
@@ -32,7 +42,7 @@ object ResolverPartition:
     */
   final case class State(
       partition: Partition,
-      generation: Long,
+      generation: Generation,
       waiting: Map[CommandId, Waiting],
       order: SortedMap[Offset, CommandId],
       next: Offset,
@@ -44,22 +54,22 @@ object ResolverPartition:
   /** A partition just assigned, read again from its committed offset. Results tagged with an older generation,
     * from before a rebalance, are dropped.
     */
-  def assigned(partition: Partition, generation: Long, committed: Offset): State =
+  def assigned(partition: Partition, generation: Generation, committed: Offset): State =
     State(partition, generation, Map.empty, SortedMap.empty, committed, None, None, committed)
 
   enum Event:
     case Read(offset: Offset, appended: LogTime, record: Record)
     /** A poll found nothing past `next`: the end of the partition (README section 6, end offsets). */
     case ReachedEnd
-    case LedgerReturned(id: CommandId, generation: Long, results: Vector[TbStatus])
-    case LedgerFailed(id: CommandId, generation: Long)
-    case OutcomeAcknowledged(id: CommandId, generation: Long)
-    case OutcomeFailed(id: CommandId, generation: Long)
+    case LedgerReturned(id: CommandId, generation: Generation, results: Vector[TbStatus])
+    case LedgerFailed(id: CommandId, generation: Generation)
+    case OutcomeAcknowledged(id: CommandId, generation: Generation)
+    case OutcomeFailed(id: CommandId, generation: Generation)
     case TimeAdvanced
 
   enum Effect:
-    case Submit(id: CommandId, generation: Long, cluster: Period, transfers: Vector[Transfer])
-    case AppendOutcome(id: CommandId, generation: Long, command: Command, outcome: Outcome)
+    case Submit(id: CommandId, generation: Generation, cluster: Period, transfers: Vector[Transfer])
+    case AppendOutcome(id: CommandId, generation: Generation, command: Command, outcome: Outcome)
     case Commit(partition: Partition, next: Offset)
     case Raise(alarm: Alarm)
     case WakeAt(at: ResolverTime)
@@ -151,7 +161,7 @@ object ResolverPartition:
     val at = now + cfg.retryBackoff
     Step(update(s, w.copy(phase = Phase.Idle(Some(at)))), Vector(Effect.WakeAt(at)), Vector(Mark.ResolverRetryScheduled))
 
-  private def current(s: State, id: CommandId, generation: Long): Option[Waiting] =
+  private def current(s: State, id: CommandId, generation: Generation): Option[Waiting] =
     if generation == s.generation then s.waiting.get(id) else None
 
   private def update(s: State, w: Waiting): State = s.copy(waiting = s.waiting.updated(w.command.id, w))
@@ -164,10 +174,10 @@ object ResolverPartition:
   */
 object Resolver:
 
-  final case class State(partitions: Map[Partition, ResolverPartition.State], generations: Long)
+  final case class State(partitions: Map[Partition, ResolverPartition.State], generations: Generation)
 
   object State:
-    val Initial: State = State(Map.empty, 0L)
+    val Initial: State = State(Map.empty, Generation.Initial)
 
   enum Event:
     case Assigned(partition: Partition, committed: Offset)
@@ -178,7 +188,7 @@ object Resolver:
   def step(s: State, now: ResolverTime, e: Event, cfg: ResolverPartition.Config): Step[State, ResolverPartition.Effect] =
     e match
       case Event.Assigned(p, committed) =>
-        val generation = s.generations + 1
+        val generation = s.generations.next
         Step(State(s.partitions.updated(p, ResolverPartition.assigned(p, generation, committed)), generation))
       case Event.Revoked(p) if s.partitions.contains(p) =>
         Step(s.copy(partitions = s.partitions - p), marks = Vector(Mark.ResolverRevoked))

@@ -15,9 +15,29 @@ object Clock:
   /** The resolver's own clock, used only for a partition with no newer records. */
   sealed trait Resolver extends Clock
 
-final case class At[C <: Clock](millis: Long) extends Ordered[At[C]]:
-  def compare(that: At[C]): Int = java.lang.Long.compare(millis, that.millis)
-  def +(d: FiniteDuration): At[C] = At(millis + d.toMillis)
+/** A time in milliseconds, read from clock `C`. An opaque `Long`: stored as a primitive, while times from different
+  * clocks stay different types.
+  */
+opaque type At[C <: Clock] = Long
+
+object At:
+  def apply[C <: Clock](millis: Long): At[C] = millis
+
+  given [C <: Clock] => Ordering[At[C]] = Ordering.Long
+
+  extension [C <: Clock](t: At[C])
+    def millis: Long = t
+    def +(d: FiniteDuration): At[C] = t + d.toMillis
+    def <(that: At[C]): Boolean = t < that
+    def <=(that: At[C]): Boolean = t <= that
+    def >(that: At[C]): Boolean = t > that
+    def >=(that: At[C]): Boolean = t >= that
+
+  extension (t: At[Clock.Log])
+    /** The one place two clocks meet: an idle partition, judged by the resolver's clock (README section 8,
+      * stragglers). Skew there changes only how soon the resolver acts.
+      */
+    def onResolverClock: At[Clock.Resolver] = t
 
 type EdgeTime = At[Clock.Edge]
 type LogTime = At[Clock.Log]
@@ -31,12 +51,6 @@ object LogTime:
 
 object ResolverTime:
   def apply(millis: Long): ResolverTime = At(millis)
-
-extension (t: LogTime)
-  /** The one place two clocks meet: an idle partition, judged by the resolver's clock (README section 8,
-    * stragglers). Skew there changes only how soon the resolver acts.
-    */
-  def onResolverClock: ResolverTime = At(t.millis)
 
 /** One step of a machine: the new state, the effects the shell must perform, and the coverage marks hit. */
 final case class Step[+S, +F](state: S, effects: Vector[F] = Vector.empty, marks: Vector[Mark] = Vector.empty):

@@ -1,7 +1,13 @@
 package ledger.core
 
-/** A period of the schedule, which names the TigerBeetle cluster that holds the holds of its keys. */
-final case class Period(index: Int)
+/** A period of the schedule, which names the TigerBeetle cluster that holds the holds of its keys. An opaque
+  * `Int`: stored as a primitive.
+  */
+opaque type Period = Int
+
+object Period:
+  def apply(index: Int): Period = index
+  extension (p: Period) def index: Int = p
 
 /** The period schedule, fixed in advance like the ID layout (README section 4, one cluster per period). Period 0
   * covers every key before the first switch; period i starts at `switches(i - 1)`, in epoch milliseconds. With no
