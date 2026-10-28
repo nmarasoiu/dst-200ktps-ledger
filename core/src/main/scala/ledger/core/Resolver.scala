@@ -171,9 +171,14 @@ object ResolverPartition:
     s.waiting.get(id).fold(s)(w => s.copy(waiting = s.waiting - id, order = s.order - w.first))
 
 /** The resolver process: one `ResolverPartition` per assigned partition. On a rebalance it drops the work in
-  * flight; reading again from the committed offset rebuilds the state (README section 8, failover).
+  * flight; reading again from the committed offset rebuilds the state (README section 8, failover). It speaks the
+  * ports: the consumer's deliveries come in, and each call and write carries its `Ref`, which the reply carries
+  * back to its partition and command.
   */
 object Resolver:
+
+  /** A call or a write for one command, on one assignment of its partition. */
+  final case class Ref(partition: Partition, id: CommandId, generation: Generation) derives CanEqual
 
   final case class State(partitions: Map[Partition, ResolverPartition.State], generations: Generation) derives CanEqual
 
@@ -181,23 +186,46 @@ object Resolver:
     val Initial: State = State(Map.empty, Generation.Initial)
 
   enum Event derives CanEqual:
-    case Assigned(partition: Partition, committed: Offset)
-    case Revoked(partition: Partition)
-    case On(partition: Partition, event: ResolverPartition.Event)
+    /** Command log: what the consumer reports. */
+    case Delivered(delivery: CommandLog.Delivery)
+    /** Ledger: the reply to a call. */
+    case Returned(ref: Ref, result: Ledger.Result)
+    /** Command log: the reply to an outcome's write. */
+    case Written(ref: Ref, result: CommandLog.Written)
+    /** Clock: a wake-up the resolver asked for. */
     case TimeAdvanced
 
-  def step(s: State, now: ResolverTime, e: Event, cfg: ResolverPartition.Config): Step[State, ResolverPartition.Effect] =
+  enum Effect derives CanEqual:
+    case Submit(ref: Ref, submit: Ledger.Submit)
+    case Append(ref: Ref, append: CommandLog.Append)
+    case Commit(commit: CommandLog.Commit)
+    case WakeAt(at: ResolverTime)
+    case Raise(alarm: Alarm)
+
+  def machine(cfg: ResolverPartition.Config): Machine[State, Event, Effect, ResolverTime] =
+    Machine(State.Initial, step(_, _, _, cfg))
+
+  def step(s: State, now: ResolverTime, e: Event, cfg: ResolverPartition.Config): Step[State, Effect] =
+    import CommandLog.Delivery
+    import ResolverPartition.Event as P
     e match
-      case Event.Assigned(p, committed) =>
+      case Event.Delivered(Delivery.Assigned(p, committed)) =>
         val generation = s.generations.next
         Step(State(s.partitions.updated(p, ResolverPartition.assigned(p, generation, committed)), generation))
-      case Event.Revoked(p) if s.partitions.contains(p) =>
+      case Event.Delivered(Delivery.Revoked(p)) if s.partitions.contains(p) =>
         Step(s.copy(partitions = s.partitions - p), marks = Vector(Mark.ResolverRevoked))
-      case Event.Revoked(_) => Step(s)
-      case Event.On(p, event) => onPartition(s, p, now, event, cfg)
+      case Event.Delivered(Delivery.Revoked(_)) => Step(s)
+      case Event.Delivered(Delivery.Read(p, offset, appended, record)) => onPartition(s, p, now, P.Read(offset, appended, record), cfg)
+      case Event.Delivered(Delivery.ReachedEnd(p)) => onPartition(s, p, now, P.ReachedEnd, cfg)
+      case Event.Returned(ref, Ledger.Result.Returned(statuses)) =>
+        onPartition(s, ref.partition, now, P.LedgerReturned(ref.id, ref.generation, statuses), cfg)
+      case Event.Returned(ref, Ledger.Result.Failed) => onPartition(s, ref.partition, now, P.LedgerFailed(ref.id, ref.generation), cfg)
+      case Event.Written(ref, CommandLog.Written.Acknowledged) =>
+        onPartition(s, ref.partition, now, P.OutcomeAcknowledged(ref.id, ref.generation), cfg)
+      case Event.Written(ref, CommandLog.Written.Failed) => onPartition(s, ref.partition, now, P.OutcomeFailed(ref.id, ref.generation), cfg)
       case Event.TimeAdvanced =>
-        s.partitions.keys.toVector.sortBy(_.index).foldLeft(Step[State, ResolverPartition.Effect](s)): (acc, p) =>
-          acc.flatMap(onPartition(_, p, now, ResolverPartition.Event.TimeAdvanced, cfg))
+        s.partitions.keys.toVector.sortBy(_.index).foldLeft(Step[State, Effect](s)): (acc, p) =>
+          acc.flatMap(onPartition(_, p, now, P.TimeAdvanced, cfg))
 
   private def onPartition(
       s: State,
@@ -205,9 +233,18 @@ object Resolver:
       now: ResolverTime,
       event: ResolverPartition.Event,
       cfg: ResolverPartition.Config,
-  ): Step[State, ResolverPartition.Effect] =
+  ): Step[State, Effect] =
     s.partitions.get(p) match
       case None => Step(s)
       case Some(ps) =>
         val next = ResolverPartition.step(ps, now, event, cfg)
-        Step(s.copy(partitions = s.partitions.updated(p, next.state)), next.effects, next.marks)
+        Step(s.copy(partitions = s.partitions.updated(p, next.state)), next.effects.map(lift(p, _)), next.marks)
+
+  private def lift(p: Partition, f: ResolverPartition.Effect): Effect = f match
+    case ResolverPartition.Effect.Submit(id, generation, cluster, transfers) =>
+      Effect.Submit(Ref(p, id, generation), Ledger.Submit(cluster, transfers))
+    case ResolverPartition.Effect.AppendOutcome(id, generation, command, outcome) =>
+      Effect.Append(Ref(p, id, generation), CommandLog.Append(Record.OutcomeRecord(command, outcome, Writer.Resolver)))
+    case ResolverPartition.Effect.Commit(partition, next) => Effect.Commit(CommandLog.Commit(partition, next))
+    case ResolverPartition.Effect.WakeAt(at) => Effect.WakeAt(at)
+    case ResolverPartition.Effect.Raise(alarm) => Effect.Raise(alarm)

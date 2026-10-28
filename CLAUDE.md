@@ -25,3 +25,6 @@ This repo is a design held in three documents and in GitHub issues; code starts 
 
 - **A body states the goal, what "done" means, and the README section it implements.** Don't copy README detail into issues; it drifts. Don't cite follow-up numbers that may move.
 - **End with the line the other issues use,** for example `Stage: 2. Pure core — see [Development stages](https://github.com/nmarasoiu/dst-200ktps-ledger#14-development-stages).` or `Phase: Later A: Card lifecycle — see [ROADMAP.md](https://github.com/nmarasoiu/dst-200ktps-ledger/blob/main/ROADMAP.md).`
+
+## Local git clones if u are a local agent
+../../distri/db/tigerbeetle

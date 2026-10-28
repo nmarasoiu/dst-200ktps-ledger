@@ -28,7 +28,7 @@ class ResolverSuite extends ScalaCheckSuite:
 
   test("section 5: a command left without an outcome is fenced once a record past its due time is read"):
     val ss = steps(read(0, 0, cmd(auth)), read(1, Due - 1, cmd(other)), read(2, Due, out(other, AuthOutcome.Approved)))
-    assertEquals(submits(ss), Vector(Effect.Submit(auth.id, Generation(1), Period(0), Vector(Transfers.fence(auth.a, Ledger)))))
+    assertEquals(submits(ss), Vector(Effect.Submit(auth.id, Generation(1), Period(0), Vector(Transfers.fence(auth.a, LedgerCfg)))))
     assert(ss.last.marks.contains(Mark.ResolverFencedAuthorization))
     val resolved = steps(
       read(0, 0, cmd(auth)),
@@ -75,7 +75,7 @@ class ResolverSuite extends ScalaCheckSuite:
     val cancel = cancelCommand(key(3))
     val capture = captureCommand(key(4), CaptureAmount.Partial(5))
     val ss = steps(read(0, 0, cmd(cancel)), read(1, 0, cmd(capture)), Due -> Event.ReachedEnd)
-    assertEquals(submits(ss).map(_.transfers), Vector(Transfers.cancel(cancel.a, Ledger), Vector(Transfers.post(capture.a, CaptureAmount.Partial(5)))))
+    assertEquals(submits(ss).map(_.transfers), Vector(Transfers.cancel(cancel.a, LedgerCfg), Vector(Transfers.post(capture.a, CaptureAmount.Partial(5)))))
 
   test("a result the rules cannot place is retried after the backoff, with an alarm"):
     val ss = steps(
@@ -95,19 +95,38 @@ class ResolverSuite extends ScalaCheckSuite:
     assertEquals(ss.last.marks, Vector(Mark.ResolverRedelivered))
 
   test("section 5: a zombie's results, from before a rebalance, are dropped"):
+    import CommandLog.Delivery
+    import Resolver.Event.Delivered
     val cfg = ResolverCfg
     val now = ResolverTime(Due)
-    val assigned = Resolver.step(Resolver.State.Initial, now, Resolver.Event.Assigned(p0, Offset(0)), cfg)
+    val assigned = Resolver.step(Resolver.State.Initial, now, Delivered(Delivery.Assigned(p0, Offset(0))), cfg)
     val first = Seq(
-      Resolver.Event.On(p0, Event.Read(Offset(0), LogTime(0), cmd(auth))),
-      Resolver.Event.On(p0, Event.ReachedEnd),
-      Resolver.Event.Revoked(p0),
-      Resolver.Event.Assigned(p0, Offset(0)),
-      Resolver.Event.On(p0, Event.LedgerReturned(auth.id, Generation(1), Vector(TbStatus.Created))),
+      Delivered(Delivery.Read(p0, Offset(0), LogTime(0), cmd(auth))),
+      Delivered(Delivery.ReachedEnd(p0)),
+      Delivered(Delivery.Revoked(p0)),
+      Delivered(Delivery.Assigned(p0, Offset(0))),
+      Resolver.Event.Returned(Resolver.Ref(p0, auth.id, Generation(1)), Ledger.Result.Returned(Vector(TbStatus.Created))),
     ).scanLeft(assigned)((s, e) => Resolver.step(s.state, now, e, cfg))
-    assertEquals(first(2).effects.collect { case s: Effect.Submit => s.generation }, Vector(Generation(1)))
+    assertEquals(first(2).effects.collect { case Resolver.Effect.Submit(ref, _) => ref.generation }, Vector(Generation(1)))
     assertEquals(first.last.effects, Vector.empty)
     assertEquals(first.last.marks, Vector(Mark.ResolverStaleResult))
+
+  test("the process speaks the ports: a fence goes out with its ref, and its reply comes back through it"):
+    import CommandLog.Delivery
+    import Resolver.Event.Delivered
+    val ref = Resolver.Ref(p0, auth.id, Generation(1))
+    val m = Resolver.machine(ResolverCfg)
+    val ss = Seq(
+      Delivered(Delivery.Assigned(p0, Offset(0))),
+      Delivered(Delivery.Read(p0, Offset(0), LogTime(0), cmd(auth))),
+      Delivered(Delivery.ReachedEnd(p0)),
+      Resolver.Event.Returned(ref, Ledger.Result.Returned(Vector(TbStatus.Created))),
+      Resolver.Event.Written(ref, CommandLog.Written.Acknowledged),
+    ).scanLeft(Step[Resolver.State, Resolver.Effect](m.initial))((s, e) => m.step(s.state, ResolverTime(Due), e))
+    assertEquals(ss(3).effects, Vector(Resolver.Effect.Submit(ref, Ledger.Submit(Period(0), Vector(Transfers.fence(auth.a, LedgerCfg))))))
+    val decided = Record.OutcomeRecord(auth, AuthOutcome.Declined(DeclineReason.NotExecuted), Writer.Resolver)
+    assertEquals(ss(4).effects, Vector(Resolver.Effect.Append(ref, CommandLog.Append(decided))))
+    assertEquals(ss(5).effects, Vector(Resolver.Effect.Commit(CommandLog.Commit(p0, Offset(1)))))
 
   // Properties over generated logs, with a small driver that answers the resolver's calls and writes.
 

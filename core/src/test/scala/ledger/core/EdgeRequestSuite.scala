@@ -32,7 +32,7 @@ class EdgeRequestSuite extends ScalaCheckSuite:
       effects(t).filterNot(_.isInstanceOf[Effect.WakeAt]),
       Vector(
         Effect.AppendCommand(authCommand(k)),
-        Effect.Submit(Period(0), Vector(Transfers.authorization(authCommand(k).asInstanceOf[Command.Authorize], Ledger))),
+        Effect.Submit(Period(0), Vector(Transfers.authorization(authCommand(k).asInstanceOf[Command.Authorize], LedgerCfg))),
         Effect.AppendOutcome(authCommand(k), AuthOutcome.Approved),
         Effect.Answer(Reply.Decided(AuthOutcome.Approved)),
       ),
@@ -87,7 +87,7 @@ class EdgeRequestSuite extends ScalaCheckSuite:
 
   test("section 8: a cancel is one call of the fence and the void, fence first"):
     val t = run(Request.Cancel(k), Seq(10L -> Event.CommandAcknowledged))
-    assertEquals(submits(t), Vector(Transfers.cancel(Ids.authorization(k), Ledger)))
+    assertEquals(submits(t), Vector(Transfers.cancel(Ids.authorization(k), LedgerCfg)))
 
   test("section 8: the edge's own cancel answers no one"):
     val t = run(
@@ -112,7 +112,7 @@ class EdgeRequestSuite extends ScalaCheckSuite:
       wall = T0 + 5000,
       cfg = cfg,
     )
-    assertEquals(submits(t), Vector(Vector(Transfers.fence(Ids.authorization(late), Ledger))))
+    assertEquals(submits(t), Vector(Vector(Transfers.fence(Ids.authorization(late), LedgerCfg))))
     assertEquals(answers(t), Vector(Reply.Decided(AuthOutcome.Approved)))
     assert(marks(t).contains(Mark.EdgePeriodEndedFencePath))
 
@@ -202,8 +202,10 @@ class EdgeRequestSuite extends ScalaCheckSuite:
   test("the generated traces reach every mark of the edge's flow, so the properties are not vacuous"):
     val sample = Gen.listOfN(3000, traces).apply(Gen.Parameters.default, org.scalacheck.rng.Seed(42L)).get
     val hit = sample.flatMap((_, _, t) => marks(t)).toSet
-    // The two period marks need a schedule with a switch; the example tests above hit them.
-    val edgeMarks = Mark.values.toSet.filter(_.toString.startsWith("Edge")) - Mark.EdgeRefusedPeriodNotStarted - Mark.EdgePeriodEndedFencePath
+    // The two period marks need a schedule with a switch; the example tests above hit them. The edge process's
+    // marks are EdgeSuite's.
+    val edgeMarks = Mark.values.toSet.filter(_.toString.startsWith("Edge")) - Mark.EdgeRefusedPeriodNotStarted -
+      Mark.EdgePeriodEndedFencePath - Mark.EdgeOwnCancelDropped - Mark.EdgeReplyAfterEnd
     assertEquals(edgeMarks -- hit, Set.empty[Mark])
 
   private def initial(t: Trace): EdgeRequest.State = t.head._3.state
