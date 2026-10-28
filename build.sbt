@@ -9,7 +9,7 @@ ThisBuild / scalacOptions ++= Seq(
 )
 
 lazy val root = (project in file("."))
-  .aggregate(core)
+  .aggregate(core, bench)
   .settings(publish / skip := true)
 
 // The pure core (README section 11). It has no library dependencies outside
@@ -21,3 +21,10 @@ lazy val core = (project in file("core"))
       "org.scalameta" %% "munit-scalacheck" % "1.3.1" % Test,
     ),
   )
+
+// JMH benchmarks of the core: throughput and, with `-prof gc`, bytes
+// allocated per operation. Run with `bench/Jmh/run -prof gc`.
+lazy val bench = (project in file("bench"))
+  .dependsOn(core)
+  .enablePlugins(JmhPlugin)
+  .settings(publish / skip := true)

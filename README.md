@@ -487,7 +487,7 @@ Each stage checks the assumptions the next one builds on: the simulator encodes 
 
 - **Stage 8, cluster chaos, moved to [ROADMAP](ROADMAP.md) phase G.** A Kubernetes staging cluster adds deployment behavior, not protocol behavior: kills, pauses and partitions already run in stage 6.
 - **One set of invariants for every stage.** They are defined once in stage 1, over one history format, and checked by the simulator, the contract tests and the offline checker.
-- **Modules mirror the stages:** `core` (no dependencies), `sim`, `checker`, `shell`, `contract-tests`, `loadgen`. The compiler keeps the core free of effects. The caller's contracts are a pure machine too, so the simulated caller and the stage 6 workload driver share them.
+- **Modules mirror the stages:** `core` (no dependencies), `sim`, `checker`, `shell`, `contract-tests`, `loadgen`, plus `bench` for benchmarks of the core. The compiler keeps the core free of effects. The caller's contracts are a pure machine too, so the simulated caller and the stage 6 workload driver share them.
 - **A simulator that never fails proves nothing.** Stage 3 includes planted bugs, such as a resolver that records an authorization expired by the clock without a fence or submits it instead of fencing it, a cancel that voids without fencing, an edge that calls TigerBeetle before its command is acknowledged or answers before its outcome is, an edge that cancels when a capture times out, a resolver that commits offsets past a command without an outcome, or a hop between the caller and the edge that resends an authorization on its own, and the simulator must catch them. A simulator that never reaches the hard cases proves little, which is what the coverage marks show.
 - **Stages 2 to 4 are the heart of the project.** A walking skeleton on real binaries before stage 5 would mostly repeat stage 0.
 - **The Postgres audit log is not a stage.** It is off the hot path and arrives with the accounting views ([ROADMAP](ROADMAP.md) phase E), loaded from the command log and the tailer. The offline checker reconciles it once it exists.
@@ -508,6 +508,7 @@ Every open-source project the design uses, cites or set aside, and when it is fi
 | [http4s](https://github.com/http4s/http4s) with Ember | The edge's API | Runtime | Stage 5 |
 | [otel4s](https://github.com/typelevel/otel4s) | Tracing and metrics (section 12, gap 5) | Runtime | Stage 5 |
 | [ScalaCheck](https://github.com/typelevel/scalacheck) with [munit](https://github.com/scalameta/munit) | Example and property tests, through munit-scalacheck. Hedgehog and weaver were the alternatives | Test tool | Stage 1 |
+| [JMH](https://github.com/openjdk/jmh), through [sbt-jmh](https://github.com/sbt/sbt-jmh) | Benchmarks of the core: throughput and allocation per step | Test tool | Stage 2 |
 | [Testcontainers](https://github.com/testcontainers/testcontainers-java) | Real TigerBeetle and Kafka for the contract tests | Test tool | Stage 4 |
 | [Toxiproxy](https://github.com/Shopify/toxiproxy) | Network faults between real processes | Test tool | Stage 6 |
 | [Chaos Mesh](https://github.com/chaos-mesh/chaos-mesh) or [LitmusChaos](https://github.com/litmuschaos/litmus) | Faults in a Kubernetes staging cluster | Test tool | Phase G |
