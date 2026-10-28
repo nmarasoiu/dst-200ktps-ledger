@@ -12,12 +12,12 @@ object Admission:
   final case class Config(maxInFlight: Int, maxLedgerLatency: FiniteDuration, partitions: Int)
 
   /** `ledgerLatencyMillis` is a moving average of the ledger's latency. */
-  final case class State(inFlight: Int, ledgerLatencyMillis: Double, leaderless: Set[Partition])
+  final case class State(inFlight: Int, ledgerLatencyMillis: Double, leaderless: Set[Partition]) derives CanEqual
 
   object State:
     val Initial: State = State(0, 0.0, Set.empty)
 
-  enum Event:
+  enum Event derives CanEqual:
     case Arrived(request: Request)
     /** An admitted request has ended. */
     case Finished
@@ -25,7 +25,7 @@ object Admission:
     /** The partitions the producer's metadata shows without a leader (README section 8, failover). */
     case LeadersChanged(leaderless: Set[Partition])
 
-  enum Decision:
+  enum Decision derives CanEqual:
     case Admit
     case Refuse(reason: RefusalReason)
     case Retry

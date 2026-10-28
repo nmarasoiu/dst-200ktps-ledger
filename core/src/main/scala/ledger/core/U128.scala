@@ -3,7 +3,7 @@ package ledger.core
 import java.lang.Long.{compareUnsigned, toUnsignedString}
 
 /** An unsigned 128-bit number, the width of TigerBeetle's IDs and amounts. */
-final case class U128(hi: Long, lo: Long):
+final case class U128(hi: Long, lo: Long) derives CanEqual:
   def isZero: Boolean = hi == 0L && lo == 0L
   def isMax: Boolean = hi == -1L && lo == -1L
   def toBigInt: BigInt = (BigInt(toUnsignedString(hi)) << 64) + BigInt(toUnsignedString(lo))

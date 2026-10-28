@@ -49,6 +49,11 @@ class MergeSuite extends ScalaCheckSuite:
   test("not_executed from expiry and from a cancel's fence are one outcome"):
     assertEquals(merged(Declined(DeclineReason.NotExecuted), Declined(DeclineReason.NotExecuted)).conflicts, Vector.empty)
 
+  test("a copy declined for reusing the key with a different payload sits beside the approval"):
+    val reused = Declined(DeclineReason.KeyReused(TbStatus.ExistsWithDifferentAmount))
+    assertEquals(merged(Approved, reused).authorizationDecision, Right(Some(Approved)))
+    assertEquals(merged(reused).authorizationDecision, Right(Some(reused)))
+
   test("approved and declined for one authorization is a conflict"):
     assert(merged(Approved, Declined(DeclineReason.NotExecuted)).conflicts.nonEmpty)
 

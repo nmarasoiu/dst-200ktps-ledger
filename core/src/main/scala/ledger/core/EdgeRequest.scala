@@ -23,12 +23,12 @@ object EdgeRequest:
   ):
     require(handOffBudget < deadline, s"the hand-off budget $handOffBudget must leave time before the deadline $deadline")
 
-  enum Origin:
+  enum Origin derives CanEqual:
     case Caller
     /** The edge's own cancel after an authorization timed out (README section 8, who cancels). It answers no one. */
     case Edge
 
-  enum Phase:
+  enum Phase derives CanEqual:
     case AwaitCommandAck
     /** Handed to the TigerBeetle client: refusing is no longer possible. */
     case AwaitLedger
@@ -37,9 +37,9 @@ object EdgeRequest:
     case AwaitLateLedger
     case Done
 
-  final case class State(command: Command, origin: Origin, start: EdgeTime, cluster: Period, fencePath: Boolean, phase: Phase)
+  final case class State(command: Command, origin: Origin, start: EdgeTime, cluster: Period, fencePath: Boolean, phase: Phase) derives CanEqual
 
-  enum Event:
+  enum Event derives CanEqual:
     case CommandAcknowledged
     case CommandFailed
     case LedgerReturned(results: Vector[TbStatus])
@@ -49,7 +49,7 @@ object EdgeRequest:
     case OutcomeFailed
     case TimeAdvanced
 
-  enum Effect:
+  enum Effect derives CanEqual:
     case AppendCommand(command: Command)
     /** One call to the cluster of the key's period, through the client the process shares. */
     case Submit(cluster: Period, transfers: Vector[Transfer])
@@ -62,19 +62,19 @@ object EdgeRequest:
 
   import Phase.*
 
-  /** A request admitted by admission control. `wallMillis` is the edge's wall clock, read only to place the key's
-    * period (README section 4).
+  /** A request admitted by admission control. `wall` is the edge's wall clock, read only to place the key's period
+    * (README section 4).
     */
-  def start(request: Request, origin: Origin, now: EdgeTime, wallMillis: Long, cfg: Config): Step[State, Effect] =
+  def start(request: Request, origin: Origin, now: EdgeTime, wall: WallTime, cfg: Config): Step[State, Effect] =
     val command = Command.stamped(request, cfg.holdTimeoutSeconds)
     val cluster = cfg.periods.periodOf(command.key.createdAt)
     val s = State(command, origin, now, cluster, fencePath = false, AwaitCommandAck)
     val write = Vector(Effect.AppendCommand(command), Effect.WakeAt(handOffBy(s, cfg)))
     command match
-      case _: Command.Authorize if !cfg.periods.hasStarted(cluster, wallMillis) =>
+      case _: Command.Authorize if !cfg.periods.hasStarted(cluster, wall) =>
         // Nothing is written or sent, so the refusal is safe whatever the clocks.
         finish(s, answer(s, Reply.Refused(RefusalReason.PeriodNotStarted)), Mark.EdgeRefusedPeriodNotStarted)
-      case _: Command.Authorize if cfg.periods.hasEnded(cluster, wallMillis) =>
+      case _: Command.Authorize if cfg.periods.hasEnded(cluster, wall) =>
         Step(s.copy(fencePath = true), write, Vector(Mark.EdgePeriodEndedFencePath))
       case _ => Step(s, write)
 

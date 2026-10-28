@@ -18,7 +18,7 @@ object Fixtures:
   /** 2026-10-28T00:00:00Z. */
   val T0: Long = 1_793_145_600_000L
 
-  def key(n: Int, at: Long = T0): ClientKey = ClientKey(at, s"key-$n")
+  def key(n: Int, at: Long = T0): ClientKey = ClientKey(WallTime(at), s"key-$n")
   def authorize(k: ClientKey, amount: Long = 100): Request.Authorize = Request.Authorize(k, Customer, Merchant, U128.of(amount), 1)
   def authCommand(k: ClientKey, amount: Long = 100): Command = Command.stamped(authorize(k, amount), HoldTimeout)
   def cancelCommand(k: ClientKey): Command = Command.Cancel(k)
@@ -51,7 +51,7 @@ object Gens:
     for
       t <- Gen.choose(ClientKey.MinTime, ClientKey.MaxTime)
       b <- Gen.alphaNumStr
-    yield ClientKey(t, b)
+    yield ClientKey(WallTime(t), b)
 
   val captureAmount: Gen[CaptureAmount] =
     Gen.oneOf(Gen.const(CaptureAmount.Full), Gen.choose(1L, 1000L).map(CaptureAmount.Partial(_)))

@@ -6,6 +6,7 @@ opaque type Partition = Int
 object Partition:
   def apply(index: Int): Partition = index
   extension (p: Partition) def index: Int = p
+  given CanEqual[Partition, Partition] = CanEqual.derived
 
 /** An offset in a partition. An opaque `Long`: stored as a primitive. */
 opaque type Offset = Long
@@ -13,6 +14,7 @@ opaque type Offset = Long
 object Offset:
   def apply(value: Long): Offset = value
   given Ordering[Offset] = Ordering.Long
+  given CanEqual[Offset, Offset] = CanEqual.derived
 
   extension (o: Offset)
     def value: Long = o

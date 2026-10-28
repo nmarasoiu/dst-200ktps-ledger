@@ -3,7 +3,7 @@ package ledger.core
 /** TigerBeetle's result codes for a transfer, as `CreateTransferStatus` in `src/tigerbeetle.zig` lists them, with
   * their numeric values. A closed type: every rule matches it exhaustively through `group`.
   */
-enum TbStatus(val code: Long):
+enum TbStatus(val code: Long) derives CanEqual:
   case Created extends TbStatus(0xffffffffL)
   case DeprecatedOk extends TbStatus(0)
   case LinkedEventFailed extends TbStatus(1)
@@ -111,7 +111,7 @@ enum TbStatus(val code: Long):
       TbGroup.Rejected(this)
 
 /** Result codes grouped by what they tell the rules. */
-enum TbGroup:
+enum TbGroup derives CanEqual:
   case Created
   case Exists
   /** Only a fence can cause this on an authorization: flags are compared first (README section 5). */
@@ -129,7 +129,7 @@ enum TbGroup:
   /** A validation failure, not recorded: the ID stays free. */
   case Rejected(status: TbStatus)
 
-enum TransferFlag:
+enum TransferFlag derives CanEqual:
   case Pending, PostPendingTransfer, VoidPendingTransfer
 
 /** The fields of a TigerBeetle transfer the pipeline sets. User data stays 0. */
@@ -143,7 +143,7 @@ final case class Transfer(
     code: Int,
     flags: Set[TransferFlag],
     timeoutSeconds: Int,
-):
+) derives CanEqual:
   def isPending: Boolean = flags(TransferFlag.Pending)
   def isPost: Boolean = flags(TransferFlag.PostPendingTransfer)
   def isVoid: Boolean = flags(TransferFlag.VoidPendingTransfer)

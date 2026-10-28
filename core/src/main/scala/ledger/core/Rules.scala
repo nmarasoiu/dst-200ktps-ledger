@@ -5,7 +5,7 @@ import DeclineReason.{NotExecuted, Unknown}
 import TbGroup as G
 
 /** What a rule makes of TigerBeetle's results. */
-enum Verdict[+O]:
+enum Verdict[+O] derives CanEqual:
   case Decided(outcome: O, mark: Mark, alarm: Option[Alarm])
   /** No definitive outcome: nothing safe can be said. The edge answers as on a timeout, and the resolver leaves
     * the command without an outcome and tries again later.

@@ -26,6 +26,20 @@ class TypeSafetySuite extends munit.FunSuite:
     assert(compileErrors("val g: Generation = 1L").nonEmpty)
     assert(compileErrors("val t: EdgeTime = 1500L").nonEmpty)
 
+  test("a wall-clock time, a history time and the edge's monotonic time are different clocks"):
+    assert(compileErrors("WallTime(1) < EdgeTime(2)").nonEmpty)
+    assert(compileErrors("val t: HistoryTime = WallTime(1)").nonEmpty)
+    assert(compileErrors("ClientKey(1700000000000L, \"k\")").nonEmpty)
+    assertEquals(compileErrors("ClientKey(WallTime(1700000000000L), \"k\").createdAt <= WallTime(1800000000000L)"), "")
+
+  test("== between unrelated types does not compile"):
+    assertEquals(compileErrors("Offset(5) == Offset(5)"), "")
+    assert(compileErrors("Offset(5) == 5L").nonEmpty)
+    assert(compileErrors("Generation(1) == Offset(1)").nonEmpty)
+    assert(compileErrors("EdgeTime(1) == LogTime(1)").nonEmpty)
+    assert(compileErrors("Kind.Cancel == CancelOutcome.Cancelled").nonEmpty)
+    assert(compileErrors("TransferId.Zero == AccountId.Zero").nonEmpty)
+
   test("transfer and account IDs are not interchangeable"):
     assert(compileErrors("val t: TransferId = AccountId.of(1)").nonEmpty)
     assert(compileErrors("val a: AccountId = TransferId.Zero").nonEmpty)

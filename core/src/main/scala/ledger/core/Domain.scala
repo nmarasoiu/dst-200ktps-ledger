@@ -8,19 +8,20 @@ object AccountId:
   def apply(value: U128): AccountId = value
   def of(n: Long): AccountId = U128.of(n)
   extension (id: AccountId) def value: U128 = id
+  given CanEqual[AccountId, AccountId] = CanEqual.derived
 
-enum Kind:
+enum Kind derives CanEqual:
   case Authorization, Cancel, Capture
 
 /** One command's identity. Copies with the same key and kind are copies of one command: an outcome for one
   * answers them all.
   */
-final case class CommandId(a: TransferId, kind: Kind)
+final case class CommandId(a: TransferId, kind: Kind) derives CanEqual
 
 /** A capture amount. Full and partial are separate cases and a partial amount is positive, so a raw 0 never
   * reaches TigerBeetle as a capture (README section 8, captures).
   */
-sealed trait CaptureAmount
+sealed trait CaptureAmount derives CanEqual
 
 object CaptureAmount:
   case object Full extends CaptureAmount
@@ -34,7 +35,7 @@ object CaptureAmount:
     def apply(minorUnits: Long): Partial = from(minorUnits).fold(e => throw IllegalArgumentException(e), identity)
 
 /** What a caller sends (README section 4). */
-enum Request:
+enum Request derives CanEqual:
   case Authorize(key: ClientKey, debit: AccountId, credit: AccountId, amount: U128, ledger: Int)
   case Cancel(key: ClientKey)
   case Capture(key: ClientKey, amount: CaptureAmount)
@@ -53,7 +54,7 @@ enum Request:
   * the command carries the stamped value, so it is part of a retry's identity (README section 8, captures).
   * Commands carry no deadline: the resolver measures it from the append time (README section 8, deadlines).
   */
-enum Command:
+enum Command derives CanEqual:
   case Authorize(key: ClientKey, debit: AccountId, credit: AccountId, amount: U128, ledger: Int, holdTimeoutSeconds: Int)
   case Cancel(key: ClientKey)
   case Capture(key: ClientKey, amount: CaptureAmount)
@@ -78,7 +79,7 @@ object Command:
 /** How a command ended. An authorization ends in a decision; the reason for a decline is best-effort detail
   * (README section 5, outcomes are decisions).
   */
-sealed trait Outcome:
+sealed trait Outcome derives CanEqual:
   def decision: Decision = this match
     case AuthOutcome.Approved => Decision.Approved
     case AuthOutcome.Declined(_) => Decision.Declined
@@ -101,10 +102,10 @@ enum CaptureOutcome extends Outcome:
   case CaptureRefused(reason: CaptureRefusal)
 
 /** An outcome without its detail: what invariants compare. */
-enum Decision:
+enum Decision derives CanEqual:
   case Approved, Declined, Cancelled, CancelRefused, Captured, CaptureRefused
 
-enum DeclineReason:
+enum DeclineReason derives CanEqual:
   /** Declined earlier, reason unknown: the fence found `id_already_failed`. */
   case Unknown
   /** `A` is fenced, whether by expiry or by a cancel. */
@@ -122,7 +123,7 @@ object DeclineReason:
       case Ledger(s) => (r.ordinal, s.ordinal)
       case _ => (r.ordinal, -1)
 
-enum CaptureRefusal:
+enum CaptureRefusal derives CanEqual:
   /** No hold to post: a fence, no hold at all, or a resend after either. */
   case NotApproved
   /** The hold was voided by a cancel. */
@@ -146,7 +147,7 @@ object CaptureRefusal:
 /** Why the edge refused a request before handing it to the TigerBeetle client. A refusal is definitive for the
   * copy it refuses (README section 5, refusals).
   */
-enum RefusalReason:
+enum RefusalReason derives CanEqual:
   case Overload
   case NoLeader
   case CommandNotAcknowledged
@@ -154,7 +155,7 @@ enum RefusalReason:
   case PeriodNotStarted
 
 /** What the edge answers. */
-enum Reply:
+enum Reply derives CanEqual:
   case Decided(outcome: Outcome)
   /** An authorization the edge never sent: the caller may resend it with the same key. */
   case Refused(reason: RefusalReason)
@@ -163,18 +164,18 @@ enum Reply:
   /** A cancel or a capture without an answer: the caller resends it with the same key. */
   case Retry
 
-enum Writer:
+enum Writer derives CanEqual:
   case Edge, Resolver
 
 /** A record of the command log, keyed by `A` (README section 4). */
-enum Record:
+enum Record derives CanEqual:
   case CommandRecord(command: Command)
   case OutcomeRecord(command: Command, outcome: Outcome, writer: Writer)
 
   def command: Command
 
 /** Something an operator must look at. None of them stops the pipeline. */
-enum Alarm:
+enum Alarm derives CanEqual:
   /** A fence failed with a transient code: the fence accounts are missing or closed. `A` is burned anyway. */
   case FenceBurned(status: TbStatus)
   /** A fence met an earlier fence with different fields: the fence's fields changed (README section 5). */

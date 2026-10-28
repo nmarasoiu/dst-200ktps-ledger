@@ -9,7 +9,7 @@ class IdsSuite extends ScalaCheckSuite:
   // Fixed test vectors, computed independently of this code from the layout in README section 7. The layout is
   // permanent: if one of these changes, cancels of existing holds would aim at the wrong ID. Never update them to
   // make a test pass.
-  private val vectorKey = ClientKey(1_700_000_000_000L, "card-auth-0001")
+  private val vectorKey = ClientKey(WallTime(1_700_000_000_000L), "card-auth-0001")
   private val vectorA = "018bcfe56800cb5ef6d202be8e8e0a72"
   private val vectorV = "018bcfe56800609fd3bb5fee3a9d3819"
   private val vectorP = "018bcfe56800ba5fd5428ff934943ba2"
@@ -27,10 +27,10 @@ class IdsSuite extends ScalaCheckSuite:
     assertEquals(encoded.toVector, Vector[Byte](0, 0, 0, 2, 'a', 'b', 0, 0, 0, 1, 7, 0, 0, 0, 0))
 
   test("a key's time must keep IDs away from 0 and the maximum value"):
-    assert(ClientKey.from(0L, "k").isLeft)
-    assert(ClientKey.from(ClientKey.MaxTime + 1, "k").isLeft)
-    assert(ClientKey.from(ClientKey.MinTime, "k").isRight)
-    assert(ClientKey.from(ClientKey.MaxTime, "k").isRight)
+    assert(ClientKey.from(WallTime(0L), "k").isLeft)
+    assert(ClientKey.from(WallTime(ClientKey.MaxTime + 1), "k").isLeft)
+    assert(ClientKey.from(WallTime(ClientKey.MinTime), "k").isRight)
+    assert(ClientKey.from(WallTime(ClientKey.MaxTime), "k").isRight)
 
   property("A takes the key's time in its high 48 bits; V and P take A's time"):
     forAll(Gens.key): k =>
@@ -45,7 +45,7 @@ class IdsSuite extends ScalaCheckSuite:
   property("the encodings of different ID kinds never coincide"):
     forAll(Gens.key, Gens.key): (k, other) =>
       val a = Ids.authorization(other)
-      val auth = Ids.encode("authorization", java.nio.ByteBuffer.allocate(8).putLong(k.createdAt).array, k.body.getBytes("UTF-8"))
+      val auth = Ids.encode("authorization", java.nio.ByteBuffer.allocate(8).putLong(k.createdAt.millis).array, k.body.getBytes("UTF-8"))
       val void = Ids.encode("void", a.value.bytes)
       val post = Ids.encode("post", a.value.bytes)
       !auth.sameElements(void) && !auth.sameElements(post) && !void.sameElements(post)
@@ -56,7 +56,7 @@ class IdsSuite extends ScalaCheckSuite:
       t2 <- Gen.choose(t1 + 1, ClientKey.MaxTime)
       b1 <- Gen.alphaNumStr
       b2 <- Gen.alphaNumStr
-    yield (ClientKey(t1, b1), ClientKey(t2, b2))
+    yield (ClientKey(WallTime(t1), b1), ClientKey(WallTime(t2), b2))
     forAll(pair): (earlier, later) =>
       Ordering[TransferId].lt(Ids.authorization(earlier), Ids.authorization(later))
 

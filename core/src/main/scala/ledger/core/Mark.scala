@@ -4,7 +4,7 @@ package ledger.core
   * of a rule or a machine. A step returns the marks it hit; example tests assert them and the simulator counts
   * them across seeds.
   */
-enum Mark:
+enum Mark derives CanEqual:
   // The authorization rule: the pending transfer `A` and its result (README section 5).
   /** Created: approved. */
   case AuthorizationCreated
