@@ -12,6 +12,7 @@ object Generation:
   val Initial: Generation = 0L
   def apply(n: Long): Generation = n
   extension (g: Generation) def next: Generation = g + 1
+  given CanEqual[Generation, Generation] = CanEqual.derived
 
 /** The resolver on one assigned partition of the command log (README section 8, resolver). It gives an outcome to
   * every command still without one a grace period after its deadline, judged in log time; it fences an
@@ -29,13 +30,13 @@ object ResolverPartition:
       ledger: LedgerConfig,
   )
 
-  enum Phase:
+  enum Phase derives CanEqual:
     case Idle(retryAt: Option[ResolverTime])
     case Submitting
     case Appending(outcome: Outcome)
 
   /** A command read with no outcome after it yet. `first` and `appended` are those of its earliest copy. */
-  final case class Waiting(first: Offset, appended: LogTime, command: Command, phase: Phase)
+  final case class Waiting(first: Offset, appended: LogTime, command: Command, phase: Phase) derives CanEqual
 
   /** `logNow` is the latest append time read: the partition's own clock. `endSeenAt` is when a poll last reached
     * the end of the partition, by the resolver's clock; a new record clears it.
@@ -49,7 +50,7 @@ object ResolverPartition:
       logNow: Option[LogTime],
       endSeenAt: Option[ResolverTime],
       committed: Offset,
-  )
+  ) derives CanEqual
 
   /** A partition just assigned, read again from its committed offset. Results tagged with an older generation,
     * from before a rebalance, are dropped.
@@ -57,7 +58,7 @@ object ResolverPartition:
   def assigned(partition: Partition, generation: Generation, committed: Offset): State =
     State(partition, generation, Map.empty, SortedMap.empty, committed, None, None, committed)
 
-  enum Event:
+  enum Event derives CanEqual:
     case Read(offset: Offset, appended: LogTime, record: Record)
     /** A poll found nothing past `next`: the end of the partition (README section 6, end offsets). */
     case ReachedEnd
@@ -67,7 +68,7 @@ object ResolverPartition:
     case OutcomeFailed(id: CommandId, generation: Generation)
     case TimeAdvanced
 
-  enum Effect:
+  enum Effect derives CanEqual:
     case Submit(id: CommandId, generation: Generation, cluster: Period, transfers: Vector[Transfer])
     case AppendOutcome(id: CommandId, generation: Generation, command: Command, outcome: Outcome)
     case Commit(partition: Partition, next: Offset)
@@ -174,12 +175,12 @@ object ResolverPartition:
   */
 object Resolver:
 
-  final case class State(partitions: Map[Partition, ResolverPartition.State], generations: Generation)
+  final case class State(partitions: Map[Partition, ResolverPartition.State], generations: Generation) derives CanEqual
 
   object State:
     val Initial: State = State(Map.empty, Generation.Initial)
 
-  enum Event:
+  enum Event derives CanEqual:
     case Assigned(partition: Partition, committed: Offset)
     case Revoked(partition: Partition)
     case On(partition: Partition, event: ResolverPartition.Event)

@@ -11,7 +11,7 @@ package ledger.core
   */
 object Caller:
 
-  enum Phase:
+  enum Phase derives CanEqual:
     case AwaitAuthorization
     case Refused
     case Approved
@@ -19,10 +19,10 @@ object Caller:
     case Capturing(amount: CaptureAmount)
     case Done
 
-  final case class State(authorization: Request.Authorize, phase: Phase):
+  final case class State(authorization: Request.Authorize, phase: Phase) derives CanEqual:
     def key: ClientKey = authorization.key
 
-  enum Event:
+  enum Event derives CanEqual:
     case Replied(reply: Reply)
     /** A connection error or no answer: non-definitive. */
     case Lost
@@ -30,7 +30,7 @@ object Caller:
     case Capture(amount: CaptureAmount)
     case Stop
 
-  enum Effect:
+  enum Effect derives CanEqual:
     case Send(request: Request)
 
   import Phase.*

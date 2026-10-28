@@ -2,8 +2,11 @@ ThisBuild / scalaVersion := "3.9.0"
 ThisBuild / organization := "io.github.nmarasoiu"
 
 // -Werror makes a non-exhaustive match an error, so a TigerBeetle result code
-// that no rule handles fails the build.
-ThisBuild / scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked", "-Wunused:all", "-Werror")
+// that no rule handles fails the build. Strict equality makes `==` between
+// unrelated types, such as an offset and a raw number, an error too.
+ThisBuild / scalacOptions ++= Seq(
+  "-deprecation", "-feature", "-unchecked", "-Wunused:all", "-Werror", "-language:strictEquality",
+)
 
 lazy val root = (project in file("."))
   .aggregate(core)

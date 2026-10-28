@@ -13,6 +13,8 @@ object Liveness:
   val ThroughputFloor = "Under overload, useful throughput stays above a floor"
 
   final case class Bounds(
+      /** The edge deadline, on each edge instance's own clock. */
+      deadline: FiniteDuration,
       /** The edge deadline plus the network between the caller and the edge, on the history clock. */
       answerWithin: FiniteDuration,
       /** The deadline plus the resolver's grace period, plus slack. */
@@ -25,16 +27,31 @@ object Liveness:
   def check(h: History, b: Bounds): Vector[Violation] =
     answeredInTime(h, b) ++ everyCommandHasOutcome(h, b) ++ everyCancelAcknowledged(h) ++ everyHoldEnds(h, b)
 
-  /** Requests sent once faults have stopped and settled, early enough that the run could see their answer. */
+  /** By each edge instance's own clock when the history has the edges' records, as README section 11 states it;
+    * otherwise from the caller's side, with an allowance for the network.
+    */
   def answeredInTime(h: History, b: Bounds): Vector[Violation] =
-    val from = h.faultsStoppedAt.fold(Long.MinValue)(_ + b.settle.toMillis)
-    val within = b.answerWithin.toMillis
+    if h.edges.nonEmpty then answeredByEdgeClock(h, b) else answeredByCallerClock(h, b)
+
+  /** Requests that reached an edge once faults had stopped and settled. With faults stopped no instance crashes,
+    * so every one of them must be answered.
+    */
+  private def answeredByEdgeClock(h: History, b: Bounds): Vector[Violation] =
+    h.edges.collect:
+      case EdgeRecord(instance, at, request, arrived, answered)
+          if judged(h, at, b) && !answered.exists((t, _) => t <= arrived + b.deadline) =>
+        Violation(Answered, s"$request at edge $instance was not answered within ${b.deadline} by its clock")
+
+  private def answeredByCallerClock(h: History, b: Bounds): Vector[Violation] =
     val received = h.caller.collect { case r: CallerRecord.Received => r }.groupBy(_.request)
     h.caller.collect:
       case CallerRecord.Sent(at, request)
-          if at >= from && at + within <= h.endedAt &&
-            !received.getOrElse(request, Vector.empty).exists(r => r.at >= at && r.at <= at + within) =>
-        Violation(Answered, s"$request sent at $at had no answer within ${b.answerWithin}")
+          if judged(h, at, b) && !received.getOrElse(request, Vector.empty).exists(r => r.at >= at && r.at <= at + b.answerWithin) =>
+        Violation(Answered, s"$request sent at ${at.millis} had no answer within ${b.answerWithin}")
+
+  /** Sent once faults have stopped and settled, early enough that the run could see the answer. */
+  private def judged(h: History, at: HistoryTime, b: Bounds): Boolean =
+    h.faultsStoppedAt.forall(stopped => at >= stopped + b.settle) && at + b.answerWithin <= h.endedAt
 
   /** An outcome later on the same partition, for every command logged early enough to have been resolved. */
   def everyCommandHasOutcome(h: History, b: Bounds): Vector[Violation] =
@@ -43,7 +60,7 @@ object Liveness:
       .groupMap(_._1)(_._2)
     h.log.collect:
       case LogRecord(p, offset, at, Record.CommandRecord(c))
-          if at + b.outcomeWithin.toMillis <= h.endedAt && !outcomes.getOrElse((p, c.id), Vector.empty).exists(_ > offset.value) =>
+          if at + b.outcomeWithin <= h.endedAt && !outcomes.getOrElse((p, c.id), Vector.empty).exists(_ > offset.value) =>
         Violation(CommandHasOutcome, s"${c.id} at partition ${p.index}, offset ${offset.value} has no outcome")
 
   def everyCancelAcknowledged(h: History): Vector[Violation] =
@@ -68,9 +85,9 @@ object Liveness:
         case (false, Some(_), None) => Vector.empty
 
   /** Decisions answered per window across an overload, each at least the floor. */
-  def throughputFloor(h: History, from: Long, to: Long, window: FiniteDuration, floor: Int): Vector[Violation] =
+  def throughputFloor(h: History, from: HistoryTime, to: HistoryTime, window: FiniteDuration, floor: Int): Vector[Violation] =
     val w = window.toMillis
-    val decided = h.caller.collect { case CallerRecord.Received(at, _, Reply.Decided(_)) if at >= from && at < to => at }
-    (from to (to - w) by w).toVector.flatMap: start =>
+    val decided = h.caller.collect { case CallerRecord.Received(at, _, Reply.Decided(_)) if at >= from && at < to => at.millis }
+    (from.millis to (to.millis - w) by w).toVector.flatMap: start =>
       val n = decided.count(at => at >= start && at < start + w)
       if n < floor then Vector(Violation(ThroughputFloor, s"$n decisions in [$start, ${start + w}), below $floor")) else Vector.empty

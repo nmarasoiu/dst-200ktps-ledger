@@ -10,12 +10,12 @@ package ledger.core
   */
 object Merge:
 
-  enum Conflict:
+  enum Conflict derives CanEqual:
     case TwoDecisions(id: CommandId, outcomes: Set[Outcome])
     case TwoEndings(a: TransferId, outcomes: Set[Outcome])
 
   /** How a hold ended. */
-  enum Ending:
+  enum Ending derives CanEqual:
     case Open
     case Cancelled
     /** The amount is unknown when the capture is known only from a cancel that found it. */
@@ -26,18 +26,22 @@ object Merge:
       authorization: Set[AuthOutcome],
       cancel: Set[CancelOutcome],
       capture: Set[CaptureOutcome],
-  ):
+  ) derives CanEqual:
     def merge(that: Hold): Hold =
       Hold(a, authorization ++ that.authorization, cancel ++ that.cancel, capture ++ that.capture)
 
     def outcomes: Set[Outcome] = authorization.toSet[Outcome] ++ cancel ++ capture
 
-    /** Approved, or declined with the most specific reason. */
+    /** Approved, or declined with the most specific reason. A copy declined because it reused the key with a
+      * different payload can sit beside the approval of the copy that holds the key: its alarm is the signal
+      * (README section 12, follow-up 6).
+      */
     def authorizationDecision: Either[Conflict, Option[AuthOutcome]] =
       val declined = authorization.collect { case d: AuthOutcome.Declined => d }
+      val besideApproval = declined.forall(_.reason.isInstanceOf[DeclineReason.KeyReused])
       if authorization.isEmpty then Right(None)
       else if !authorization.contains(AuthOutcome.Approved) then Right(Some(declined.maxBy(_.reason)))
-      else if declined.isEmpty then Right(Some(AuthOutcome.Approved))
+      else if besideApproval then Right(Some(AuthOutcome.Approved))
       else Left(Conflict.TwoDecisions(CommandId(a, Kind.Authorization), authorization.toSet))
 
     def cancelDecision: Either[Conflict, Option[CancelOutcome]] =

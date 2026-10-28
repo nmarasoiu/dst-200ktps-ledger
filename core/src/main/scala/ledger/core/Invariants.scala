@@ -71,7 +71,9 @@ object Invariants:
       val posts = h.ledger.posts(a)
       val authorization = hold.authorizationDecision.toOption.flatten.toVector.flatMap:
         case AuthOutcome.Approved if !held => broken("approved, but the ledger has no hold")
-        case AuthOutcome.Declined(_) if held => broken("declined, but the ledger holds it")
+        // A key reused with a different payload is declined while the copy that holds the key keeps its hold.
+        case AuthOutcome.Declined(reason) if held && !reason.isInstanceOf[DeclineReason.KeyReused] =>
+          broken("declined, but the ledger holds it")
         case _ => Vector.empty
       val cancel = hold.cancelDecision.toOption.flatten.toVector.flatMap:
         case CancelOutcome.CancelRefused if posts.isEmpty => broken("cancel_refused, but the hold was never posted")

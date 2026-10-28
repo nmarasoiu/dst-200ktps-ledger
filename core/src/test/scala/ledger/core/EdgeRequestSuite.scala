@@ -15,7 +15,7 @@ class EdgeRequestSuite extends ScalaCheckSuite:
   private type Trace = Vector[(EdgeTime, Option[Event], Step[EdgeRequest.State, Effect])]
 
   private def run(request: Request, events: Seq[(Long, Event)], origin: Origin = Origin.Caller, wall: Long = T0, cfg: EdgeRequest.Config = EdgeCfg): Trace =
-    val first = EdgeRequest.start(request, origin, start, wall, cfg)
+    val first = EdgeRequest.start(request, origin, start, WallTime(wall), cfg)
     events.foldLeft(Vector[(EdgeTime, Option[Event], Step[EdgeRequest.State, Effect])]((start, None, first))):
       case (trace, (at, e)) => trace :+ ((EdgeTime(at), Some(e), EdgeRequest.step(trace.last._3.state, EdgeTime(at), e, cfg)))
 
@@ -99,12 +99,12 @@ class EdgeRequestSuite extends ScalaCheckSuite:
     assert(effects(t).contains(Effect.AppendOutcome(cancelCommand(k), CancelOutcome.Cancelled)))
 
   test("section 4: an authorization whose period has not started is refused without writing"):
-    val cfg = EdgeCfg.copy(periods = PeriodSchedule(Vector(T0 + 1000)))
+    val cfg = EdgeCfg.copy(periods = PeriodSchedule(Vector(WallTime(T0 + 1000))))
     val t = run(authorize(key(1, at = T0 + 2000)), Seq.empty, wall = T0, cfg = cfg)
     assertEquals(effects(t), Vector(Effect.Answer(Reply.Refused(RefusalReason.PeriodNotStarted))))
 
   test("section 4: an authorization whose period has ended is fenced, and approved if a copy created the hold"):
-    val cfg = EdgeCfg.copy(periods = PeriodSchedule(Vector(T0 + 1000)))
+    val cfg = EdgeCfg.copy(periods = PeriodSchedule(Vector(WallTime(T0 + 1000))))
     val late = key(1, at = T0)
     val t = run(
       authorize(late),

@@ -11,6 +11,7 @@ import Fixtures.*
 final case class HistoryBuilder(
     caller: Vector[CallerRecord] = Vector.empty,
     log: Vector[LogRecord] = Vector.empty,
+    edges: Vector[EdgeRecord] = Vector.empty,
     transfers: Vector[LedgerTransfer] = Vector.empty,
     accounts: Vector[LedgerAccount] = Vector.empty,
     expiries: Option[Map[TransferId, Long]] = None,
@@ -18,18 +19,25 @@ final case class HistoryBuilder(
     faultsStoppedAt: Option[Long] = None,
     endedAt: Long = 100_000L,
 ):
-  def sent(at: Long, r: Request): HistoryBuilder = copy(caller = caller :+ CallerRecord.Sent(at, r))
-  def received(at: Long, r: Request, reply: Reply): HistoryBuilder = copy(caller = caller :+ CallerRecord.Received(at, r, reply))
-  def lost(at: Long, r: Request): HistoryBuilder = copy(caller = caller :+ CallerRecord.Lost(at, r))
+  def sent(at: Long, r: Request): HistoryBuilder = copy(caller = caller :+ CallerRecord.Sent(HistoryTime(at), r))
+  def received(at: Long, r: Request, reply: Reply): HistoryBuilder =
+    copy(caller = caller :+ CallerRecord.Received(HistoryTime(at), r, reply))
+  def lost(at: Long, r: Request): HistoryBuilder = copy(caller = caller :+ CallerRecord.Lost(HistoryTime(at), r))
+  /** A request at an edge instance, arriving at `arrived` and answered at `answered`, both by the edge's clock. */
+  def edge(at: Long, r: Request, arrived: Long, answered: Option[Long], instance: Int = 1): HistoryBuilder =
+    val answer = answered.map(t => (EdgeTime(t), Reply.Decided(AuthOutcome.Approved)))
+    copy(edges = edges :+ EdgeRecord(instance, HistoryTime(at), r, EdgeTime(arrived), answer))
   def logged(at: Long, c: Command): HistoryBuilder = append(at, Record.CommandRecord(c))
   def decided(at: Long, c: Command, o: Outcome, by: Writer = Writer.Edge): HistoryBuilder = append(at, Record.OutcomeRecord(c, o, by))
   def ledger(t: Transfer, timestamp: Long): HistoryBuilder = copy(transfers = transfers :+ LedgerTransfer(Period(0), t, timestamp))
   def limited(id: AccountId): HistoryBuilder = copy(accounts = accounts :+ LedgerAccount(Period(0), id, debitsMustNotExceedCredits = true, creditsMustNotExceedDebits = false))
 
   def history: History =
-    History(caller, log, LedgerSnapshot(transfers, accounts, Map(Period(0) -> scannedAt), expiries), faultsStoppedAt, endedAt)
+    val snapshot = LedgerSnapshot(transfers, accounts, Map(Period(0) -> scannedAt), expiries)
+    History(caller, log, edges, snapshot, faultsStoppedAt.map(HistoryTime(_)), HistoryTime(endedAt))
 
-  private def append(at: Long, r: Record): HistoryBuilder = copy(log = log :+ LogRecord(Partition(0), Offset(log.size.toLong), at, r))
+  private def append(at: Long, r: Record): HistoryBuilder =
+    copy(log = log :+ LogRecord(Partition(0), Offset(log.size.toLong), HistoryTime(at), r))
 
 object Histories:
   val k: ClientKey = key(1)
@@ -183,7 +191,8 @@ class LivenessSuite extends munit.FunSuite:
   import Histories.*
   import scala.concurrent.duration.*
 
-  private val bounds = Liveness.Bounds(answerWithin = 2.seconds, outcomeWithin = 10.seconds, settle = 1.second, expiryLag = 1.second)
+  private val bounds =
+    Liveness.Bounds(deadline = 1500.millis, answerWithin = 2.seconds, outcomeWithin = 10.seconds, settle = 1.second, expiryLag = 1.second)
   private def broken(h: HistoryBuilder): Set[String] = Liveness.check(h.history, bounds).map(_.property).toSet
 
   test("an approved, logged and answered authorization breaks nothing"):
@@ -192,6 +201,18 @@ class LivenessSuite extends munit.FunSuite:
   test(Liveness.Answered + ": no answer after faults stopped"):
     val h = HistoryBuilder(faultsStoppedAt = Some(1000)).sent(5000, auth)
     assertEquals(broken(h), Set(Liveness.Answered))
+
+  test(Liveness.Answered + ", by the edge's clock: answered after the deadline"):
+    // On time by the history's clock, late by the edge's own.
+    val h = HistoryBuilder().edge(at = 5000, auth, arrived = 70_000, answered = Some(71_600))
+    assertEquals(broken(h), Set(Liveness.Answered))
+
+  test(Liveness.Answered + ", by the edge's clock: never answered by a live instance"):
+    assertEquals(broken(HistoryBuilder().edge(at = 5000, auth, arrived = 70_000, answered = None)), Set(Liveness.Answered))
+
+  test("answered within the deadline by the edge's clock passes, and then the caller's side is not used"):
+    val h = HistoryBuilder().edge(at = 5000, auth, arrived = 70_000, answered = Some(71_400)).sent(5000, auth)
+    assertEquals(broken(h), Set.empty[String])
 
   test("requests sent during faults, or too close to the end, are not judged"):
     assertEquals(broken(HistoryBuilder(faultsStoppedAt = Some(10_000)).sent(5000, auth)), Set.empty[String])
@@ -215,5 +236,5 @@ class LivenessSuite extends munit.FunSuite:
 
   test(Liveness.ThroughputFloor):
     val h = (0 until 10).foldLeft(HistoryBuilder())((b, i) => b.received(i * 100L, auth, Reply.Decided(Approved)))
-    assertEquals(Liveness.throughputFloor(h.history, 0, 1000, 500.millis, 5), Vector.empty)
-    assertEquals(Liveness.throughputFloor(h.history, 0, 2000, 500.millis, 5).size, 2)
+    assertEquals(Liveness.throughputFloor(h.history, HistoryTime(0), HistoryTime(1000), 500.millis, 5), Vector.empty)
+    assertEquals(Liveness.throughputFloor(h.history, HistoryTime(0), HistoryTime(2000), 500.millis, 5).size, 2)

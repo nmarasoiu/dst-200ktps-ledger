@@ -14,6 +14,13 @@ object Clock:
   sealed trait Log extends Clock
   /** The resolver's own clock, used only for a partition with no newer records. */
   sealed trait Resolver extends Clock
+  /** Calendar time in epoch milliseconds, as a wall clock reads it: the caller's, for a key's creation time; an
+    * edge's, to place a key's period; and the period schedule itself. These are compared on purpose, and the fence
+    * keeps clocks that disagree safe (README section 4, one cluster per period).
+    */
+  sealed trait Wall extends Clock
+  /** The one clock of a history: the simulator's own time, or the workload driver's clock in real runs. */
+  sealed trait History extends Clock
 
 /** A time in milliseconds, read from clock `C`. An opaque `Long`: stored as a primitive, while times from different
   * clocks stay different types.
@@ -24,6 +31,7 @@ object At:
   def apply[C <: Clock](millis: Long): At[C] = millis
 
   given [C <: Clock] => Ordering[At[C]] = Ordering.Long
+  given [C <: Clock] => CanEqual[At[C], At[C]] = CanEqual.derived
 
   extension [C <: Clock](t: At[C])
     def millis: Long = t
@@ -42,6 +50,8 @@ object At:
 type EdgeTime = At[Clock.Edge]
 type LogTime = At[Clock.Log]
 type ResolverTime = At[Clock.Resolver]
+type WallTime = At[Clock.Wall]
+type HistoryTime = At[Clock.History]
 
 object EdgeTime:
   def apply(millis: Long): EdgeTime = At(millis)
@@ -51,6 +61,12 @@ object LogTime:
 
 object ResolverTime:
   def apply(millis: Long): ResolverTime = At(millis)
+
+object WallTime:
+  def apply(millis: Long): WallTime = At(millis)
+
+object HistoryTime:
+  def apply(millis: Long): HistoryTime = At(millis)
 
 /** One step of a machine: the new state, the effects the shell must perform, and the coverage marks hit. */
 final case class Step[+S, +F](state: S, effects: Vector[F] = Vector.empty, marks: Vector[Mark] = Vector.empty):
