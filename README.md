@@ -17,7 +17,8 @@ A hobby design for a card-authorization ledger pipeline that sustains 50,000 tra
 - **Rate:** 50k TPS as an average over a 1-minute window, with 75k TPS as the stress scenario. Sub-second bursts of 2 to 3 times that are absorbed by larger ledger batches and by admission control (*estimate*). Each authorization costs TigerBeetle about two events over its life, so 50k TPS means about 100k TigerBeetle events per second (section 3).
 - **Deadline:** the ledger answers within **1.5 s**, inside the bank's 2 to 3 s card-network budget. A "timed out" answer is acceptable and does not count toward SLA penalties.
 - **Correctness bar:** no double debit, no lost result, a deterministic outcome for every request, and safe cancellation of any request the caller got no definitive answer for, so that a "timed out" reply never leaves money held, even when any process crashes at any point.
-- **Building blocks:** Kafka (the replicated command log), TigerBeetle (ledger and money invariants), Postgres (the complete audit log, off the hot path; [ROADMAP](ROADMAP.md) phase E).
+- **Building blocks:** Kafka (the replicated command log, kept 30 days), TigerBeetle (ledger and money invariants, and the permanent record of money movements), Postgres (the complete audit log and the long-term record, off the hot path; [ROADMAP](ROADMAP.md) phase E).
+- **Rules:** EU. The anti-money-laundering regulation keeps transaction records for 5 years after the customer relationship ends, or after an occasional transaction, then deletes their personal data; authorities may require up to 5 more years (section 6). The Postgres audit log keeps them (section 4, three records).
 
 ## 2. Design philosophy
 
@@ -61,7 +62,7 @@ flowchart TD
 ```
 
 - **Edge:** accepts an authorization, a `cancel(clientKey)` or a `capture(clientKey, amount)`, and derives the TigerBeetle ID by hashing the client key (section 7). It writes the command to the command log and waits until the in-sync replicas acknowledge it, then calls TigerBeetle through the client it shares with every request in its process, writes the outcome and waits for that acknowledgement too, and only then answers. Each step continues from the last, so no thread waits (section 10). Without an acknowledged command the edge never calls TigerBeetle; without an acknowledged outcome it gives the same answer as on a timeout.
-- **Command log:** one Kafka topic holding every command and every outcome, keyed by the authorization's transfer ID, so each hold's whole story sits on one partition, in the order it was written. Replication factor 3 with `min.insync.replicas` 2, so an acknowledged record is on at least two machines (section 6).
+- **Command log:** one Kafka topic holding every command and every outcome, keyed by the authorization's transfer ID, so each hold's whole story sits on one partition, in the order it was written. Replication factor 3 with `min.insync.replicas` 2, so an acknowledged record is on at least two machines (section 6). It keeps records for 30 days; the long-term record is the audit log (three records, below).
 - **Resolver:** reads the command log and gives an outcome to every command still without one a grace period after its deadline, measured in the log's own time rather than by its clock. An authorization gets the fence; a cancel or a capture is resubmitted (section 8, resolver). It compares nothing: reconciling the log against the ledger is the offline checker's job, and later the audit log's. It is TigerBeetle's only other writer, and it never submits an authorization. It commits offsets only up to its oldest command still without an outcome.
 - **No replies topic:** the process that holds the caller's connection makes the TigerBeetle call, so it answers directly. If it crashes, the connection goes with it and no answer is owed; the caller sees an error and cancels (section 9).
 - **Downstream:** consumers read the command log. The Postgres audit log ([ROADMAP](ROADMAP.md) phase E) also reads TigerBeetle through the tailer, which returns every transfer in timestamp order (section 12, gap 4). Until then, the offline checker reads TigerBeetle with the same query once after each run.
@@ -76,11 +77,26 @@ flowchart TD
 
 Every later command about a hold (cancel, capture, reversal) carries `A`, so the partitioner routes every command on `A`. Kafka does not deduplicate on the record key, so two records sharing it are simply two records on one partition, in order. Keying by account would order every operation on an account for no benefit, since TigerBeetle already enforces balances, and would turn busy accounts into hot partitions.
 
-**Command log rules** that follow from sharing the key:
+**Command log rules:**
 
 - **`cleanup.policy=delete`, never `compact`.** Compaction keeps only the latest record per key, so a cancel or an outcome would erase its authorization from the log, breaking principle 2.
 - **Partition count fixed for the topic's life.** The default partitioner maps a key to `hash(key) mod N`; changing N scatters one hold's commands across partitions. Fenced cancels (section 8) keep that correct, but it defeats per-hold locality. Resizing means a new topic and draining the old one, so choose N with headroom.
 - **`message.timestamp.type=LogAppendTime`.** The partition leader stamps each record with the time it appended it, and the resolver measures its grace period in these times (section 8, resolver).
+- **`retention.ms` of 30 days, and no `retention.bytes` limit.** Records leave the log only by age. The 30 days cover the audit loader's worst outage plus the age of the oldest Postgres backup worth restoring (*estimate*), and the loader's lag raises an alarm long before. Kafka's default is 7 days (section 6).
+- **The resolver never skips to the end of the log.** It uses `auto.offset.reset=none`, which is fs2-kafka's default, so a committed offset that is missing or has aged out of the log stops it with an error. Kafka's own default, `latest`, would silently skip every command still without an outcome (section 6). On first deployment an operator seeds its offsets at the start of the topic. The brokers keep committed offsets for at least 30 days, since by default an empty group's offsets expire after 7.
+
+**Three records, three jobs.** Each store keeps one kind of record, for as long as it is needed.
+
+| Store | Keeps | For how long | Clock for periods |
+| --- | --- | --- | --- |
+| TigerBeetle | Every transfer: holds, posts, voids and fences | Forever | Its timestamp, which only grows (section 6) |
+| Command log | Every command and its decision, declines and their reasons included: what each caller was told, durable before the answer | 30 days | The command's append time |
+| Postgres audit log | Both, joined and queryable | As long as EU rules require (section 1) | Both, side by side |
+
+- **Kafka is transport.** The record exists before the answer because the edge waits for the in-sync replicas' acknowledgement, not because Kafka keeps it for long. The audit log's lag changes when a period's report can run, never what it holds: a period closes only once the audit log holds everything in it, and reports read only closed periods ([ROADMAP](ROADMAP.md) phase E).
+- **Money by the ledger's clock.** A money movement belongs to the period of its TigerBeetle timestamp; a command and its decision belong to the period of the command's append time. Near midnight the two can fall on different sides, and the audit log keeps both times.
+- **Rebuilding the audit log.** Postgres is restored from a backup younger than 30 days and replayed from the positions stored with its rows, so a lost or damaged audit log loses nothing.
+- **Until phase E,** nothing keeps commands and decisions beyond 30 days. That is acceptable only before production.
 
 ## 5. Correctness under crash-stop
 
@@ -169,6 +185,12 @@ Every crash point resolves to one decision, whether the edge records it or the r
 | A producer's send returns a future and takes a callback; callbacks run on the producer's I/O thread and must be quick | Verified in source | [source](https://github.com/apache/kafka/blob/trunk/clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java) (`send`) |
 | fs2-kafka produces in two steps: the first puts the record in the producer's buffer, the second completes on the acknowledgement. Many sends waited on concurrently keep throughput but lose their order relative to each other | Verified in source | [source](https://github.com/typelevel/fs2-kafka/blob/main/modules/core/src/main/scala/fs2/kafka/KafkaProducer.scala) (`produce`) |
 | An asynchronous callback does not run the waiting fiber on the caller's thread; Cats Effect schedules it back on the fiber's own execution context, normally the compute pool | Verified in source | [source](https://github.com/typelevel/cats-effect/blob/series/3.x/core/shared/src/main/scala/cats/effect/IOFiber.scala) (`scheduleFiber`) |
+| A topic deletes records after 7 days by default, with no size limit | Verified in source | [source](https://github.com/apache/kafka/blob/trunk/storage/src/main/java/org/apache/kafka/storage/internals/log/LogConfig.java) (`DEFAULT_RETENTION_MS`), [source](https://github.com/apache/kafka/blob/trunk/server-common/src/main/java/org/apache/kafka/server/config/ServerLogConfigs.java) (`LOG_RETENTION_BYTES_DEFAULT`) |
+| A consumer whose committed offset is missing, or no longer in the log, follows `auto.offset.reset`: `latest` by default, which skips to the end of the partition; with `none` it gets an error instead | Verified in source | [source](https://github.com/apache/kafka/blob/trunk/clients/src/main/java/org/apache/kafka/clients/consumer/ConsumerConfig.java) (`AUTO_OFFSET_RESET_CONFIG`), [source](https://github.com/apache/kafka/blob/trunk/clients/src/main/java/org/apache/kafka/clients/consumer/internals/FetchCollector.java) (`handleInitializeErrors`) |
+| fs2-kafka sets `auto.offset.reset` to `none` by default | Verified in source | [source](https://github.com/typelevel/fs2-kafka/blob/main/modules/core/src/main/scala/fs2/kafka/ConsumerSettings.scala) (`create`) |
+| By default a group's committed offsets expire 7 days after the group becomes empty | Verified in source | [source](https://github.com/apache/kafka/blob/trunk/group-coordinator/src/main/java/org/apache/kafka/coordinator/group/GroupCoordinatorConfig.java) (`OFFSETS_RETENTION_MINUTES_DEFAULT`) |
+| Tiered storage, which moves old log segments to an external store, has been production-ready since Kafka 3.9 (November 2024). Kafka ships no store for it, only interfaces and test fixtures, and 4.3.2 fixed two potential data loss issues, one of them in tiered storage's size-based retention | Verified in source and on Kafka's site | [3.9.0 announcement](https://kafka.apache.org/blog/2024/11/06/apache-kafka-3.9.0-release-announcement/), [downloads](https://kafka.apache.org/community/downloads/), [source](https://github.com/apache/kafka/tree/trunk/storage/src/main/java/org/apache/kafka/server/log/remote/storage) |
+| EU anti-money-laundering rules keep transaction records for 5 years from the end of the business relationship or the date of an occasional transaction, then delete their personal data; authorities may require up to 5 more years. Records kept only as references must be impossible to modify | Verified in the article's text as reproduced by a reading aid; the Official Journal is binding | Regulation (EU) 2024/1624, Article 77 ([text](https://www.springlex.eu/en/packages/aml/amlr-regulation/article-77/)) |
 | Card networks do not resend an authorization within a round; they apply stand-in and send an advice | Recollection, verify | Scheme specifications |
 | Card-network authorization is synchronous on the hot path | Recollection, verify | Scheme specifications |
 | An acquirer that gets no issuer answer sends a reversal for that authorization | Recollection, verify | ISO 8583 and scheme specifications |
@@ -411,6 +433,7 @@ These are open in the functional and non-functional spec.
 | Ledger-side sweeper for unanswered requests | Cannot tell a lost reply from a delivered one; would void holds the caller believes approved |
 | Kyo instead of Cats Effect for the shell | No native Kafka client; fs2 bridging means two runtimes |
 | Kafka transactions around the batcher's results, replies and offsets | They do not cover the TigerBeetle call, and consumers handle duplicates anyway. Read-committed readers would wait for each commit, and one stalled batcher's open transaction would hold back the replies of every batcher writing the same partitions, for up to the transaction timeout |
+| Kafka as the permanent record, with tiered storage, and databases as views of it | The record already exists before the answer, from the in-sync replicas' acknowledgement, whatever the retention. Auditors cannot query Kafka, so Postgres is needed anyway; every old record format would have to stay readable for years; one retention or cleanup change would delete history; and tiered storage is young, with no store shipped and a data loss fix as recent as 4.3.2 (section 6) |
 
 The chosen design is a synchronous path too. What sets it apart from the sync row above is the replicated log on both sides of the ledger call, and a resolver that resolves stragglers through the ledger's own rules, the fence included, rather than by rules of its own. The price of two paths is that one rarely runs in production; the simulator runs it constantly (section 2, principle 5).
 
