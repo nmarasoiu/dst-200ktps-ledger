@@ -6,6 +6,8 @@ A hobby design for a card-authorization ledger pipeline that sustains 50,000 tra
 
 **Also in this repo:** [DESIGN-LOG.md](DESIGN-LOG.md) records every decision that was corrected and how the flaw was found; [ROADMAP.md](ROADMAP.md) lists the phases beyond the core. [CLAUDE.md](CLAUDE.md) holds the conventions for anyone, human or agent, editing the repo.
 
+**TigerBeetle in one place:** [section 16](#16-how-the-design-uses-tigerbeetle) lists what the design relies on, what it works around, and questions for the TigerBeetle team.
+
 **Status markers used throughout:** *verified* = checked against the cited source; *estimate* = rough reasoning, to measure; *recollection* or *verify* = believed true, not yet checked.
 
 ---
@@ -515,3 +517,32 @@ Every open-source project the design uses, cites or set aside, and when it is fi
 | [Redpanda Connect](https://github.com/redpanda-data/connect) | Its `tigerbeetle_cdc` input is one route from that feed to Kafka | Set aside | None |
 | [Debezium](https://github.com/debezium/debezium) | Change data capture from Postgres, for the original Postgres-hub design (section 13) | Set aside | None |
 | [Kyo](https://github.com/getkyo/kyo) | Considered for the shell (section 10) | Set aside | None |
+
+## 16. How the design uses TigerBeetle
+
+What the design asks of TigerBeetle, and what it works around, in one place. Each item points to the section that argues it, and section 6 holds the sources.
+
+**What the design relies on**
+
+- **The client generates the ID.** The caller's key starts with its creation time, and `A` takes TigerBeetle's recommended layout: 48 bits of milliseconds, then 80 bits, here a hash of the key rather than random bits. `V` and `P` derive from `A`. Every ID can be computed from the request alone, so retries, replays and recovery all submit the same one (sections 6 and 7).
+- **Idempotency carries all of recovery.** A retry, a stale send from a crashed edge and a resolver repeating a decision all reach TigerBeetle with the same ID. `exists` is handled exactly like `created`, and since 0.17.0 it returns the original timestamp, so no lookup follows. `id_already_failed` reads as a decline (section 5).
+- **The fence uses ID uniqueness as a lock.** A cancel writes a zero-amount transfer with the authorization's own ID `A` between two fence accounts, then voids `A`, as two unlinked events. Whichever reaches TigerBeetle first wins. A late authorization gets `exists_with_different_flags`, which only a fence can cause, because the ID check runs before any validation and flags are compared first. The resolver expires a stale authorization the same way, so the ledger decides expiry, not a clock (section 8).
+- **Holds are pending transfers with a timeout.** The edge stamps the 7-day timeout into each authorization. TigerBeetle compares the timeout before the accounts and the amount, so it is part of a retry's identity. Expiry is TigerBeetle's own: a reader marks a hold expired from its timestamp and timeout, with no record needed (section 8; section 12, gap 4).
+- **Captures are posts with a fixed ID.** One per hold. A partial post releases the rest, full is sent as the maximum amount, and a replay returns `exists` (section 8).
+- **Batching comes from the client.** Each process shares one client, which packs whatever arrives while its request is in flight, so there is no central batcher. An event handed to the client cannot be taken back, so the edge refuses a request before the hand-off, never after (sections 5, 6 and 10).
+- **Only the pipeline writes.** The edges and the resolver are TigerBeetle's only writers, and every write follows a command logged in Kafka, so the log records everything the ledger did apart from expiries (section 2).
+- **One scan, not change data capture.** The offline checker reads every transfer with a timestamp-only query, relying on timestamps that only grow. The audit log's tailer is the same scan run continuously. Built-in change data capture is set aside because it publishes only over AMQP (section 12, gap 4).
+- **The simulator follows TigerBeetle's.** A seeded event loop with simulated Kafka and TigerBeetle, a liveness mode once faults stop, and a coverage mark for every hard case, as in `src/vopr.zig` and `src/testing/marks.zig` (section 11).
+
+**What the design assumes or works around**
+
+- **Throughput.** About 100k events a second at the 50k TPS peak is assumed to be within one cluster's reach, and is measured only as part of the whole pipeline (section 3).
+- **Storage.** A data file is capped and nothing can be deleted, so the ledger runs one cluster per period until tiering to object storage ships (section 4).
+
+**Questions for the TigerBeetle team**
+
+1. Does a query go through consensus like a write, so that a scan takes ledger capacity? Section 6 has this as *recollection, verify*.
+2. With tiering to object storage, does the existence check for a new time-ordered ID avoid reading the tiered levels? And is there a rough date for a release?
+3. Is a zero-amount fence the intended way to make an ID unusable, or is there a better primitive?
+4. Is there a recommended way to move an account's balance to a new cluster while its pending transfers drain in the old one, given that an imported pending transfer cannot carry a timeout?
+5. How does the expiry lag behave when many holds expire at once under load? Section 6 reads about 100 ms from the source; the contract suite will measure it.
