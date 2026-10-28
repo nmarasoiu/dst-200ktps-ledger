@@ -48,15 +48,18 @@ Prove the protocols, not just test them.
 
 ## E. Accounting views
 
-Postgres as the complete audit log, and the accounting views on top of it.
+Postgres as the complete audit log and the long-term record (README section 4, three records), and the accounting views on top of it.
 
 - Every command and outcome from the command log, and every ledger change from the tailer, each checked against the other. The tailer is the offline checker's scan of every transfer by timestamp, run continuously and keeping its position (README section 12, gap 4). Expiries are derived from each hold's timestamp and timeout.
 - Exactly-once loading: each reader stores its position in the same Postgres transaction as the rows it writes, so a restart resumes where the last commit left off.
-- Time partitions, with older ones moved to cheaper storage. At the target rate the log grows by hundreds of GB a day (*estimate*), so "complete" means across Postgres and the archive.
+- Closing a period: a period closes once the audit log holds everything in it. For money, the tailer has passed the period's end in TigerBeetle time, which only grows. For decisions, on every partition the resolver's committed offset has passed the last command appended before the period's end, so each of those commands has its outcome in the log, and the loader has read up to the partition's end offset as it stood then. Reports read only closed periods, so the loader's lag delays a report but never changes what it holds.
+- Append-only: audit rows are never updated or deleted. Personal data is encrypted, and erased at the end of its retention period by deleting its key (phase G).
+- Rebuilding: a backup younger than the command log's 30 days, replayed from the positions stored with its rows, loses nothing (README section 4).
+- Time partitions, with older ones moved to cheaper storage. EU rules keep records for 5 years after the customer relationship ends, and up to 5 more when authorities require it (README section 1). At the target rate the log grows by hundreds of GB a day (*estimate*), so "complete" means across Postgres and the archive.
 - A chart of accounts on top of TigerBeetle accounts.
 - Statements, balance history, interest accrual and fees.
 
-**Done when** the audit log's two sources agree, and statements reconcile with TigerBeetle balances at any point in time.
+**Done when** the audit log's two sources agree, statements reconcile with TigerBeetle balances at any point in time, and a report for a period that closes while the loader lags waits for the close and then matches TigerBeetle.
 
 ## F. Real-time risk checks
 
@@ -71,7 +74,7 @@ Postgres as the complete audit log, and the accounting views on top of it.
 - Disaster recovery across regions, with stated recovery point and recovery time objectives.
 - Upgrades without downtime, including a live switch from hashed to time-ordered IDs.
 - Safe evolution of message formats.
-- Privacy erasure against an immutable ledger, using encrypted personal data whose keys can be deleted.
+- Privacy erasure against an immutable ledger, using encrypted personal data whose keys can be deleted, including the deletion EU rules require when a record's retention period ends (README section 6).
 - Chaos in a Kubernetes staging cluster with Chaos Mesh or LitmusChaos, moved from stage 8: pod and node kills, partitions, I/O delay, CPU pressure and clock skew. Antithesis is optional.
 
 **Done when** a region failover, a live upgrade and scheduled chaos runs all pass the offline checker.
