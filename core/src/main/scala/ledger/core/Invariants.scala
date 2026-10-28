@@ -149,6 +149,6 @@ object Invariants:
           limits.get((cluster, account)).toVector.flatMap: limit =>
             val debits = limit.debitsMustNotExceedCredits && b.debitsPending + b.debitsPosted > b.creditsPosted
             val credits = limit.creditsMustNotExceedDebits && b.creditsPending + b.creditsPosted > b.debitsPosted
-            if debits || credits then Vector(Violation(BalancesWithinLimits, s"account $account in $cluster at $at: $b")) else Vector.empty
+            if debits || credits then Vector(Violation(BalancesWithinLimits, s"account $account in period ${cluster.index} at $at: $b")) else Vector.empty
         (next, found ++ broken)
     violations

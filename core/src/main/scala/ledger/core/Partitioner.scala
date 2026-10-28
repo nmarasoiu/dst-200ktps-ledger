@@ -1,12 +1,22 @@
 package ledger.core
 
-final case class Partition(index: Int)
+/** A partition of the command log. An opaque `Int`: stored as a primitive. */
+opaque type Partition = Int
 
-final case class Offset(value: Long):
-  def next: Offset = Offset(value + 1)
+object Partition:
+  def apply(index: Int): Partition = index
+  extension (p: Partition) def index: Int = p
+
+/** An offset in a partition. An opaque `Long`: stored as a primitive. */
+opaque type Offset = Long
 
 object Offset:
-  given Ordering[Offset] = Ordering.by(_.value)
+  def apply(value: Long): Offset = value
+  given Ordering[Offset] = Ordering.Long
+
+  extension (o: Offset)
+    def value: Long = o
+    def next: Offset = o + 1
 
 /** Kafka's default partitioner (README section 6): murmur2 of the record key, made positive, modulo the partition
   * count. The record key is `A` as 16 big-endian bytes (README section 4, three keys). Like the ID layout, it can

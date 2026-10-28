@@ -16,7 +16,7 @@ class ResolverSuite extends ScalaCheckSuite:
     ResolverPartition.step(s, ResolverTime(now), e, ResolverCfg)
 
   private def steps(events: (Long, Event)*): Vector[Step[ResolverPartition.State, Effect]] =
-    events.foldLeft(Vector(Step[ResolverPartition.State, Effect](ResolverPartition.assigned(p0, 1, Offset(0))))):
+    events.foldLeft(Vector(Step[ResolverPartition.State, Effect](ResolverPartition.assigned(p0, Generation(1), Offset(0))))):
       case (acc, (now, e)) => acc :+ step(acc.last.state, now, e)
 
   private def read(offset: Long, at: Long, r: Record): (Long, Event) = at -> Event.Read(Offset(offset), LogTime(at), r)
@@ -28,15 +28,15 @@ class ResolverSuite extends ScalaCheckSuite:
 
   test("section 5: a command left without an outcome is fenced once a record past its due time is read"):
     val ss = steps(read(0, 0, cmd(auth)), read(1, Due - 1, cmd(other)), read(2, Due, out(other, AuthOutcome.Approved)))
-    assertEquals(submits(ss), Vector(Effect.Submit(auth.id, 1, Period(0), Vector(Transfers.fence(auth.a, Ledger)))))
+    assertEquals(submits(ss), Vector(Effect.Submit(auth.id, Generation(1), Period(0), Vector(Transfers.fence(auth.a, Ledger)))))
     assert(ss.last.marks.contains(Mark.ResolverFencedAuthorization))
     val resolved = steps(
       read(0, 0, cmd(auth)),
       read(1, Due, out(other, AuthOutcome.Approved)),
-      Due -> Event.LedgerReturned(auth.id, 1, Vector(TbStatus.ExistsWithDifferentFlags)),
-      Due -> Event.OutcomeAcknowledged(auth.id, 1),
+      Due -> Event.LedgerReturned(auth.id, Generation(1), Vector(TbStatus.ExistsWithDifferentFlags)),
+      Due -> Event.OutcomeAcknowledged(auth.id, Generation(1)),
     )
-    assert(resolved(3).effects.contains(Effect.AppendOutcome(auth.id, 1, auth, AuthOutcome.Approved)))
+    assert(resolved(3).effects.contains(Effect.AppendOutcome(auth.id, Generation(1), auth, AuthOutcome.Approved)))
     assertEquals(resolved.last.effects, Vector(Effect.Commit(p0, Offset(2))))
 
   test("section 5: an edge's outcome read within the grace period: no action, and the commit moves past it"):
@@ -65,7 +65,7 @@ class ResolverSuite extends ScalaCheckSuite:
       read(0, 0, cmd(auth)),
       Due -> Event.ReachedEnd,
       read(1, Due + 5, out(auth, AuthOutcome.Approved)),
-      (Due + 6) -> Event.LedgerReturned(auth.id, 1, Vector(TbStatus.ExistsWithDifferentFlags)),
+      (Due + 6) -> Event.LedgerReturned(auth.id, Generation(1), Vector(TbStatus.ExistsWithDifferentFlags)),
     )
     assert(ss(3).marks.contains(Mark.ResolverOutcomeWhileInFlight))
     assertEquals(ss.flatMap(_.effects).collect { case a: Effect.AppendOutcome => a }, Vector.empty)
@@ -81,7 +81,7 @@ class ResolverSuite extends ScalaCheckSuite:
     val ss = steps(
       read(0, 0, cmd(auth)),
       Due -> Event.ReachedEnd,
-      Due -> Event.LedgerReturned(auth.id, 1, Vector(TbStatus.LedgerMustNotBeZero)),
+      Due -> Event.LedgerReturned(auth.id, Generation(1), Vector(TbStatus.LedgerMustNotBeZero)),
       (Due + 100) -> Event.TimeAdvanced,
       (Due + 500) -> Event.TimeAdvanced,
     )
@@ -103,9 +103,9 @@ class ResolverSuite extends ScalaCheckSuite:
       Resolver.Event.On(p0, Event.ReachedEnd),
       Resolver.Event.Revoked(p0),
       Resolver.Event.Assigned(p0, Offset(0)),
-      Resolver.Event.On(p0, Event.LedgerReturned(auth.id, 1, Vector(TbStatus.Created))),
+      Resolver.Event.On(p0, Event.LedgerReturned(auth.id, Generation(1), Vector(TbStatus.Created))),
     ).scanLeft(assigned)((s, e) => Resolver.step(s.state, now, e, cfg))
-    assertEquals(first(2).effects.collect { case s: Effect.Submit => s.generation }, Vector(1L))
+    assertEquals(first(2).effects.collect { case s: Effect.Submit => s.generation }, Vector(Generation(1)))
     assertEquals(first.last.effects, Vector.empty)
     assertEquals(first.last.marks, Vector(Mark.ResolverStaleResult))
 
@@ -145,7 +145,7 @@ class ResolverSuite extends ScalaCheckSuite:
     */
   private def drive(log: Vector[Entry], from: Int, answer: Command => Vector[TbStatus]): Driven =
     val commands = log.map(_.record.command).map(c => c.id -> c).toMap
-    var s = ResolverPartition.assigned(p0, 1, Offset(from))
+    var s = ResolverPartition.assigned(p0, Generation(1), Offset(from))
     var waiting = Map.empty[CommandId, Long]
     val effects = Vector.newBuilder[Effect]
     val marks = Vector.newBuilder[Mark]

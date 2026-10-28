@@ -44,7 +44,7 @@ object Liveness:
     h.log.collect:
       case LogRecord(p, offset, at, Record.CommandRecord(c))
           if at + b.outcomeWithin.toMillis <= h.endedAt && !outcomes.getOrElse((p, c.id), Vector.empty).exists(_ > offset.value) =>
-        Violation(CommandHasOutcome, s"${c.id} at $p, $offset has no outcome")
+        Violation(CommandHasOutcome, s"${c.id} at partition ${p.index}, offset ${offset.value} has no outcome")
 
   def everyCancelAcknowledged(h: History): Vector[Violation] =
     val sent = h.caller.collect { case CallerRecord.Sent(_, r: Request.Cancel) => r.key }.distinct
