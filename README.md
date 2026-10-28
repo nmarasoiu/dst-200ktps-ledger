@@ -13,7 +13,7 @@ A hobby design for a card-authorization ledger pipeline that sustains 50,000 tra
 ## 1. Context and goals
 
 - **Domain:** card-authorization-style debits. The issuer must answer within a hard deadline; holds (pending amounts) are later posted or voided.
-- **Setting:** a hypothetical core-banking platform serving a large bank. Clients may be async-capable or may insist on a synchronous call.
+- **Setting:** a hypothetical core-banking platform serving a large bank. Each deployment serves one client, the bank; another client gets its own deployment. The bank's caller systems may be async-capable or may insist on a synchronous call.
 - **Rate:** 50k TPS as an average over a 1-minute window, with 75k TPS as the stress scenario. Sub-second bursts of 2 to 3 times that are absorbed by larger ledger batches and by admission control (*estimate*). Each authorization costs TigerBeetle about two events over its life, so 50k TPS means about 100k TigerBeetle events per second (section 3).
 - **Deadline:** the ledger answers within **1.5 s**, inside the bank's 2 to 3 s card-network budget. A "timed out" answer is acceptable and does not count toward SLA penalties.
 - **Correctness bar:** no double debit, no lost result, a deterministic outcome for every request, and safe cancellation of any request the caller got no definitive answer for, so that a "timed out" reply never leaves money held, even when any process crashes at any point.
@@ -71,7 +71,7 @@ flowchart TD
 | Key | Identifies | Authorization | Cancel | Capture |
 | --- | --- | --- | --- | --- |
 | Client idempotency key | The client's request | `clientKey` | The same `clientKey` | The same `clientKey` |
-| TigerBeetle transfer ID | One ledger command; TigerBeetle deduplicates on it | `A = hash(clientId, clientKey)` | Fence `A` (same ID, no flags) and void `V = hash(A, "void")` | Post `P = hash(A, "post")` |
+| TigerBeetle transfer ID | One ledger command; TigerBeetle deduplicates on it | `A = hash(clientKey)` | Fence `A` (same ID, no flags) and void `V = hash(A, "void")` | Post `P = hash(A, "post")` |
 | Kafka record key | The hold the command concerns; only picks the partition | `A` | `A` | `A` |
 
 Every later command about a hold (cancel, capture, reversal) carries `A`, so the partitioner routes every command on `A`. Kafka does not deduplicate on the record key, so two records sharing it are simply two records on one partition, in order. Keying by account would order every operation on an account for no benefit, since TigerBeetle already enforces balances, and would turn busy accounts into hot partitions.
@@ -178,9 +178,9 @@ Every crash point resolves to one decision, whether the edge records it or the r
 
 The mapping from a client key to a TigerBeetle ID sits behind one interface, so it can be swapped without touching the pipeline.
 
-- **Chosen: hashing.** The ID is a 128-bit hash of client ID plus client key. It needs no store, is deterministic, survives replay, and lets the edge compute it before anything else happens.
+- **Chosen: hashing.** The ID is a 128-bit hash of the client key. A deployment serves one client (section 1), so the key alone identifies a request. It needs no store, is deterministic, survives replay, and lets the edge compute it before anything else happens.
 - **Cost:** about 10% lower TigerBeetle throughput than strictly increasing IDs (*verified*). The likely mechanism (*inferred*): random keys make LSM files overlap, so compaction rewrites more and existence checks probe more levels.
-- **Contract:** TigerBeetle remembers IDs forever, so client keys must be unique per client for all time. Do not scope the hash by calendar date, or a retry crossing midnight becomes a new transfer.
+- **Contract:** TigerBeetle remembers IDs forever, so client keys must be unique within the deployment for all time. Every system of the bank that mints authorization keys shares that one key space, so each must keep its keys apart from the others'. Do not scope the hash by calendar date, or a retry crossing midnight becomes a new transfer.
 - **The hash is permanent.** A cancel recomputes `A` from the client key, so changing the hash function or how its inputs are encoded would aim the cancels of existing holds at the wrong ID. Fix it once in stage 1: a cryptographic hash truncated to 128 bits, over length-prefixed fields with a tag per ID kind, so no client key can encode to the input of a void or post ID, and never 0 or the maximum value, which TigerBeetle rejects.
 - **Retry contract:** once an ID fails with a transient error or is voided, it can never succeed again. (Validation errors are not recorded, so an ID rejected for those could succeed if resent with corrected fields; with hashed IDs and unchanged fields this does not arise.) A client resends an authorization only after a refusal, and then with the same key, since the refused copy never reached TigerBeetle and the same key finds any copy that did (section 5, resending a refusal). After a non-definitive result it never resends: it cancels, and a genuinely new attempt uses a new key (section 8). Cancels and captures are resent with the same key until answered. Otherwise reusing a key is left to the system itself: the resolver fences an authorization's own ID and resubmits cancels and captures, and a crashed or paused edge's send can arrive late.
 - **Cancel and capture IDs:** a cancel's fence reuses `A` itself, and its void gets the fixed ID `V = hash(A, "void")`. A capture gets the fixed ID `P = hash(A, "post")`, one per hold, since TigerBeetle posts a hold at most once. So cancels and captures are idempotent too.
