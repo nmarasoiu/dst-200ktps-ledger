@@ -30,13 +30,14 @@ Go beyond one cluster's throughput and one cluster's storage. At the assumed vol
 
 ## C. Formal verification
 
-Prove the protocols, not just test them.
+Prove the protocols and the pure core, not just test them.
 
-- A TLA+ or P model of fence-then-void and of replay-safe expiry, model-checked against the README invariants.
+- A model of fence-then-void and of replay-safe expiry, model-checked against the README invariants. TLA+, P and Lean with Veil are the candidates (README section 15); choose when this phase starts. Only Veil shares a language with the model of the pure core below, but it is a pre-release and proves safety only (*verified*: [Veil](https://github.com/verse-lab/veil)).
+- A proven Lean model of the pure core beside the Scala core, as [Cedar](https://arxiv.org/abs/2407.01688) does with Rust. The Scala core stays what runs (README section 10). Stage 3's seeds feed the same events to both across a process boundary, and any difference in their steps is a bug. That link is testing, so it is evidence that the two agree, not proof. Start with the merge, then the machines' ordering rules.
 - A Jepsen-style checker for balance reads. Stage 6 already checks what the workload driver was told about its own requests; this checks that every balance a caller reads is explained by some order of the transfers the ledger applied. It needs the pipeline to serve reads, from TigerBeetle or from the Postgres audit log of phase E. Jepsen's Elle is the reference.
 - The same model extended to the cross-shard protocol of phase B.
 
-**Done when** the model checker finds the planted bugs of stage 3 and passes the real design.
+**Depends on** stages 3 and 4: the planted bugs and seeds come from the simulator, and a proof about Kafka or TigerBeetle holds only as far as the contract tests back its model of them. **Done when** the model checker finds the planted bugs of stage 3 and passes the real design, and the proofs about the core pass with the Lean model and the Scala core agreeing on stage 3's seeds.
 
 ## D. Multiple currencies
 
