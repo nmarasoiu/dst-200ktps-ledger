@@ -4,7 +4,7 @@ import org.scalacheck.Gen
 import scala.concurrent.duration.*
 
 object Fixtures:
-  val Ledger: LedgerConfig = LedgerConfig(
+  val LedgerCfg: LedgerConfig = LedgerConfig(
     fenceDebit = AccountId.of(9001),
     fenceCredit = AccountId.of(9002),
     fenceLedger = 9,
@@ -30,7 +30,7 @@ object Fixtures:
     lateResultWait = 2.seconds,
     holdTimeoutSeconds = HoldTimeout,
     periods = PeriodSchedule.Single,
-    ledger = Ledger,
+    ledger = LedgerCfg,
   )
 
   val ResolverCfg: ResolverPartition.Config = ResolverPartition.Config(
@@ -38,7 +38,7 @@ object Fixtures:
     grace = 3.seconds,
     retryBackoff = 500.millis,
     periods = PeriodSchedule.Single,
-    ledger = Ledger,
+    ledger = LedgerCfg,
   )
 
   /** What the resolver waits after a command, in log time, before judging it. */

@@ -1,5 +1,6 @@
 package ledger.core
 
+import java.util.concurrent.TimeUnit.MILLISECONDS
 import scala.concurrent.duration.FiniteDuration
 
 /** Whose clock a time was read from. Times from different clocks cannot be compared, so safety cannot come to
@@ -36,6 +37,8 @@ object At:
   extension [C <: Clock](t: At[C])
     def millis: Long = t
     def +(d: FiniteDuration): At[C] = t + d.toMillis
+    /** The time between two readings of the same clock. */
+    def -(that: At[C]): FiniteDuration = FiniteDuration(t - that, MILLISECONDS)
     def <(that: At[C]): Boolean = t < that
     def <=(that: At[C]): Boolean = t <= that
     def >(that: At[C]): Boolean = t > that
@@ -75,3 +78,10 @@ final case class Step[+S, +F](state: S, effects: Vector[F] = Vector.empty, marks
     Step(next.state, effects ++ next.effects, marks ++ next.marks)
 
   def mark(m: Mark): Step[S, F] = copy(marks = marks :+ m)
+
+/** A process as the interpreters run it: the state it starts with, holding nothing, and its step (README section 11,
+  * processes). `T` is what the process reads from its clocks at each step. Every process has this one shape, so the
+  * simulator runs them alike: a crash drops the state and restarts from `initial`, a pause holds back the events,
+  * and a planted bug rewrites the effects.
+  */
+final case class Machine[S, E, F, T](initial: S, step: (S, T, E) => Step[S, F])

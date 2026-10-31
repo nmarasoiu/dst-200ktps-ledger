@@ -112,6 +112,12 @@ enum Mark derives CanEqual:
   /** No ledger result by the end of the late wait; the resolver will give the outcome. */
   case EdgeLateResultAbandoned
 
+  // The edge process: its requests under admission control (README section 11, processes).
+  /** The edge's own cancel found its partition without a leader: dropped, since the caller's cancel is the guarantee. */
+  case EdgeOwnCancelDropped
+  /** A reply for a request that has ended, such as the acknowledgement of a late decision's outcome. */
+  case EdgeReplyAfterEnd
+
   // Admission control (README section 12, gap 1).
   case AdmissionRefusedOverload
   case AdmissionRefusedNoLeader
