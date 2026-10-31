@@ -16,6 +16,7 @@ class CoreBench:
   private val holdTimeout = 7 * 24 * 3600
   private val edge = EdgeRequest.Config(1500.millis, 1200.millis, 2.seconds, holdTimeout, PeriodSchedule.Single, ledger)
   private val resolver = ResolverPartition.Config(1500.millis, 3.seconds, 500.millis, PeriodSchedule.Single, ledger)
+  private val edgeProcess = Edge.Config(edge, Admission.Config(maxInFlight = 4096, maxLedgerLatency = 200.millis, partitions = 64))
   private val t0 = 1_793_145_600_000L
   private val keys = Array.tabulate(1024)(i => ClientKey(WallTime(t0 + i), s"key-$i"))
   private val requests = keys.map(k => Request.Authorize(k, AccountId.of(1), AccountId.of(2), U128.of(100), 1))
@@ -37,6 +38,22 @@ class CoreBench:
     val s1 = EdgeRequest.step(s0.state, EdgeTime(10), CommandAcknowledged, edge)
     val s2 = EdgeRequest.step(s1.state, EdgeTime(20), LedgerReturned(created), edge)
     EdgeRequest.step(s2.state, EdgeTime(30), OutcomeAcknowledged, edge)
+
+  /** The same authorization through the edge process: admission control, then the request's flow, with each reply
+    * routed to the request by its ref.
+    */
+  @Benchmark def edgeProcessAuthorization(): Step[Edge.State, Edge.Effect] =
+    import Edge.Event.*
+    val n = next()
+    val connection = Connection(n)
+    val ref = Edge.Ref.Caller(connection)
+    val command = Command.stamped(requests(n), holdTimeout)
+    def at(t: Long) = Edge.Now(EdgeTime(t), WallTime(t0 + t))
+    val acked = CommandLog.Written.Acknowledged
+    val s0 = Edge.step(Edge.State.Initial, at(0), Arrived(connection, requests(n)), edgeProcess)
+    val s1 = Edge.step(s0.state, at(10), Written(ref, Record.CommandRecord(command), acked), edgeProcess)
+    val s2 = Edge.step(s1.state, at(20), Returned(ref, Ledger.Result.Returned(created)), edgeProcess)
+    Edge.step(s2.state, at(30), Written(ref, Record.OutcomeRecord(command, AuthOutcome.Approved, Writer.Edge), acked), edgeProcess)
 
   /** The resolver's common case: a command, then its outcome within the grace period, so no action. */
   @Benchmark def resolverCommandThenOutcome(): Step[ResolverPartition.State, ResolverPartition.Effect] =

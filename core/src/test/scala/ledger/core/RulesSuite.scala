@@ -160,19 +160,19 @@ class RulesSuite extends munit.FunSuite:
 
   test("an authorization is a pending transfer with ID A and the stamped hold timeout"):
     val c = Fixtures.authCommand(Fixtures.key(1)).asInstanceOf[Command.Authorize]
-    val t = Transfers.authorization(c, Fixtures.Ledger)
+    val t = Transfers.authorization(c, Fixtures.LedgerCfg)
     assertEquals((t.id, t.flags, t.timeoutSeconds), (c.a, Set(TransferFlag.Pending), Fixtures.HoldTimeout))
 
   test("a cancel is the fence, then the void, with amount 0 and fields inherited"):
     val a = Ids.authorization(Fixtures.key(1))
-    val Vector(fence, void) = Transfers.cancel(a, Fixtures.Ledger): @unchecked
+    val Vector(fence, void) = Transfers.cancel(a, Fixtures.LedgerCfg): @unchecked
     assertEquals((fence.id, fence.amount, fence.flags, fence.pendingId), (a, U128.Zero, Set.empty[TransferFlag], TransferId.Zero))
     assertEquals((void.id, void.pendingId, void.amount, void.ledger, void.code), (Ids.void(a), a, U128.Zero, 0, 0))
 
   test("every fence is identical, whoever writes it"):
     val c = Fixtures.authCommand(Fixtures.key(1))
-    assertEquals(Transfers.forResolver(c, Fixtures.Ledger), Transfers.forEdge(c, fencePath = true, Fixtures.Ledger))
-    assertEquals(Transfers.forResolver(c, Fixtures.Ledger).head, Transfers.cancel(c.a, Fixtures.Ledger).head)
+    assertEquals(Transfers.forResolver(c, Fixtures.LedgerCfg), Transfers.forEdge(c, fencePath = true, Fixtures.LedgerCfg))
+    assertEquals(Transfers.forResolver(c, Fixtures.LedgerCfg).head, Transfers.cancel(c.a, Fixtures.LedgerCfg).head)
 
   test("a full capture is sent as the maximum amount, a partial one as its amount; never a raw 0"):
     val a = Ids.authorization(Fixtures.key(1))

@@ -46,7 +46,7 @@ object Histories:
   val a: TransferId = authC.a
   val cancel: Request.Cancel = Request.Cancel(k)
   val cancelC: Command = cancelCommand(k)
-  val hold: Transfer = Transfers.authorization(authC, Ledger)
+  val hold: Transfer = Transfers.authorization(authC, LedgerCfg)
 
   /** Authorized, logged, approved by the ledger, logged and answered. */
   val approved: HistoryBuilder = HistoryBuilder()
@@ -83,7 +83,7 @@ class InvariantsSuite extends munit.FunSuite:
       .decided(10, authC, rejected)
       .received(11, auth, Reply.Decided(rejected))
       .logged(20, cancelC)
-      .ledger(Transfers.fence(a, Ledger), 30)
+      .ledger(Transfers.fence(a, LedgerCfg), 30)
       .decided(40, cancelC, Cancelled)
       .logged(50, authC)
       .decided(60, authC, Declined(DeclineReason.NotExecuted), Writer.Resolver)
@@ -181,7 +181,7 @@ class InvariantsSuite extends munit.FunSuite:
     assertHolds(approved.limited(Customer).ledger(fund(100), 5))
 
   test("an expired hold releases its amount before the next one"):
-    val second = Transfers.authorization(authCommand(key(2), amount = 100).asInstanceOf[Command.Authorize], Ledger)
+    val second = Transfers.authorization(authCommand(key(2), amount = 100).asInstanceOf[Command.Authorize], LedgerCfg)
     val afterExpiry = HoldTimeout * 1_000_000_000L + 20
     val base = HistoryBuilder().limited(Customer).ledger(fund(150), 1).ledger(hold, 10)
     assertHolds(base.ledger(second, afterExpiry).copy(scannedAt = afterExpiry + 1))
