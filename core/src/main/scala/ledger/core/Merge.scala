@@ -48,10 +48,13 @@ object Merge:
       if cancel.size > 1 then Left(Conflict.TwoDecisions(CommandId(a, Kind.Cancel), cancel.toSet)) else Right(cancel.headOption)
 
     /** Captured, or refused with the most specific reason. A refusal TigerBeetle did not record, or one about a
-      * different amount, can sit beside a capture without contradicting it (README section 8, captures).
+      * different amount, can sit beside a capture without contradicting it (README section 8, captures). So can a full
+      * capture beside a partial one: TigerBeetle answers `exists` only when they are the same money, a partial of the
+      * whole hold, and the partial says how much.
       */
     def captureDecision: Either[Conflict, Option[CaptureOutcome]] =
       val captured = capture.collect { case c: CaptureOutcome.Captured => c }
+      val spelled = captured.collect { case c @ CaptureOutcome.Captured(_: CaptureAmount.Partial) => c }
       val refused = capture.collect { case r: CaptureOutcome.CaptureRefused => r }
       val besideCapture = refused.forall:
         _.reason match
@@ -59,7 +62,7 @@ object Merge:
           case _ => false
       if capture.isEmpty then Right(None)
       else if captured.isEmpty then Right(Some(refused.maxBy(_.reason)))
-      else if captured.size == 1 && besideCapture then Right(captured.headOption)
+      else if spelled.size <= 1 && besideCapture then Right(spelled.headOption.orElse(captured.headOption))
       else Left(Conflict.TwoDecisions(CommandId(a, Kind.Capture), capture.toSet))
 
     /** A cancel reported `cancelled` decides the ending, whatever approval came before or after it (README section

@@ -16,6 +16,7 @@ final case class HistoryBuilder(
     accounts: Vector[LedgerAccount] = Vector.empty,
     expiries: Option[Map[TransferId, Long]] = None,
     scannedAt: Long = 1_000_000_000L,
+    healedAt: Option[Long] = None,
     faultsStoppedAt: Option[Long] = None,
     endedAt: Long = 100_000L,
 ):
@@ -33,7 +34,7 @@ final case class HistoryBuilder(
   def limited(id: AccountId): HistoryBuilder = copy(accounts = accounts :+ LedgerAccount(Period(0), id, debitsMustNotExceedCredits = true, creditsMustNotExceedDebits = false))
 
   def history: History =
-    val snapshot = LedgerSnapshot(transfers, accounts, Map(Period(0) -> scannedAt), expiries)
+    val snapshot = LedgerSnapshot(transfers, accounts, Map(Period(0) -> scannedAt), expiries, healedAt.map(Period(0) -> _).toMap)
     History(caller, log, edges, snapshot, faultsStoppedAt.map(HistoryTime(_)), HistoryTime(endedAt))
 
   private def append(at: Long, r: Record): HistoryBuilder =
@@ -47,6 +48,8 @@ object Histories:
   val cancel: Request.Cancel = Request.Cancel(k)
   val cancelC: Command = cancelCommand(k)
   val hold: Transfer = Transfers.authorization(authC, LedgerCfg)
+  /** A capture as TigerBeetle records it: the hold's accounts, ledger and code, and the amount moved. */
+  val posted: Transfer = Transfers.post(a, CaptureAmount.Full).copy(debit = hold.debit, credit = hold.credit, amount = hold.amount, ledger = hold.ledger, code = hold.code)
 
   /** Authorized, logged, approved by the ledger, logged and answered. */
   val approved: HistoryBuilder = HistoryBuilder()
@@ -69,7 +72,7 @@ class InvariantsSuite extends munit.FunSuite:
 
   test(Invariants.NoTransferTwice):
     assert(broken(approved.ledger(hold, 11)).contains(Invariants.NoTransferTwice))
-    val postedAndVoided = approved.ledger(Transfers.post(a, CaptureAmount.Full), 40).ledger(Transfers.void(a), 50)
+    val postedAndVoided = approved.ledger(posted, 40).ledger(Transfers.void(a), 50)
     assert(broken(postedAndVoided).contains(Invariants.NoTransferTwice))
 
   test(Invariants.OneOutcome + ": an approval and a decline for one authorization"):
@@ -137,7 +140,7 @@ class InvariantsSuite extends munit.FunSuite:
   test(Invariants.CancelLeavesNoHold + ": after a cancel is reported cancelled, a capture succeeds"):
     val capture = Request.Capture(k, CaptureAmount.Full)
     val h = cancelledAfterApproval
-      .ledger(Transfers.post(a, CaptureAmount.Full), 200)
+      .ledger(posted, 200)
       .sent(190, capture)
       .logged(191, captureCommand(k))
       .decided(210, captureCommand(k), Captured(CaptureAmount.Full))
@@ -146,15 +149,32 @@ class InvariantsSuite extends munit.FunSuite:
 
   private val captured = approved
     .logged(100, captureCommand(k))
-    .ledger(Transfers.post(a, CaptureAmount.Full), 110)
+    .ledger(posted, 110)
     .decided(120, captureCommand(k), Captured(CaptureAmount.Full))
 
   test("a hold captured once, in full, passes"):
     assertHolds(captured)
 
   test(Invariants.CaptureOnce + ": captured twice"):
-    val again = Transfers.post(a, CaptureAmount.Full).copy(id = Ids.void(a))
+    val again = posted.copy(id = Ids.void(a))
     assert(broken(captured.ledger(again, 130)).contains(Invariants.CaptureOnce))
+
+  test(Invariants.MatchesLedger + ": captured in full, but the ledger moved less"):
+    val h = approved
+      .logged(100, captureCommand(k))
+      .ledger(posted.copy(amount = U128.of(hold.amount.lo - 1)), 110)
+      .decided(120, captureCommand(k), Captured(CaptureAmount.Full))
+    assertEquals(broken(h), Set(Invariants.MatchesLedger))
+
+  test(Invariants.MatchesLedger + ": a full capture beside a partial one says the hold was all moved"):
+    val whole = approved.logged(100, captureCommand(k)).ledger(posted, 110)
+      .decided(120, captureCommand(k), Captured(CaptureAmount.Full))
+      .decided(121, captureCommand(k), Captured(CaptureAmount.Partial(hold.amount.lo)))
+    assertHolds(whole)
+    val less = approved.logged(100, captureCommand(k)).ledger(posted.copy(amount = U128.of(1)), 110)
+      .decided(120, captureCommand(k), Captured(CaptureAmount.Full))
+      .decided(121, captureCommand(k), Captured(CaptureAmount.Partial(1)))
+    assertEquals(broken(less), Set(Invariants.MatchesLedger))
 
   test(Invariants.CaptureOnce + ": captured for more than it held"):
     val h = approved.ledger(Transfers.post(a, CaptureAmount.Partial(1000)), 110)
@@ -180,10 +200,26 @@ class InvariantsSuite extends munit.FunSuite:
   test("a hold within the customer's credits passes"):
     assertHolds(approved.limited(Customer).ledger(fund(100), 5))
 
+  test(Invariants.ApprovalStands):
+    def brokenKeepingContracts(h: HistoryBuilder) = Invariants.checkKeptContracts(h.history).map(_.property).toSet
+    val voided = approved.logged(30, cancelC).ledger(Transfers.void(a), 40)
+    assert(brokenKeepingContracts(voided).contains(Invariants.ApprovalStands))
+    assert(!brokenKeepingContracts(voided.sent(25, cancel)).contains(Invariants.ApprovalStands))
+    // A caller that sent a key twice can hear this about a copy of its own that timed out, and the money stays safe.
+    assert(!broken(voided).contains(Invariants.ApprovalStands))
+
+  test(Invariants.WritesFollowCommands):
+    assert(broken(HistoryBuilder().ledger(hold, 10)).contains(Invariants.WritesFollowCommands))
+    assert(broken(approved.ledger(Transfers.void(a), 40)).contains(Invariants.WritesFollowCommands))
+    assert(broken(approved.ledger(posted, 40)).contains(Invariants.WritesFollowCommands))
+    assert(!broken(approved.logged(30, cancelC).ledger(Transfers.void(a), 40)).contains(Invariants.WritesFollowCommands))
+    assert(!broken(captured).contains(Invariants.WritesFollowCommands))
+
   test("an expired hold releases its amount before the next one"):
     val second = Transfers.authorization(authCommand(key(2), amount = 100).asInstanceOf[Command.Authorize], LedgerCfg)
     val afterExpiry = HoldTimeout * 1_000_000_000L + 20
-    val base = HistoryBuilder().limited(Customer).ledger(fund(150), 1).ledger(hold, 10)
+    val logged = HistoryBuilder().logged(0, authC).logged(0, authCommand(key(2), amount = 100))
+    val base = logged.limited(Customer).ledger(fund(150), 1).ledger(hold, 10)
     assertHolds(base.ledger(second, afterExpiry).copy(scannedAt = afterExpiry + 1))
     assert(broken(base.ledger(second, 20)).contains(Invariants.BalancesWithinLimits))
 
@@ -233,6 +269,14 @@ class LivenessSuite extends munit.FunSuite:
     assertEquals(broken(held), Set(Liveness.HoldEnds))
     assertEquals(broken(held.copy(expiries = Some(Map(a -> (due - 5))))), Set.empty[String])
     assertEquals(broken(HistoryBuilder().ledger(hold.copy(timeoutSeconds = 0), 10)), Set(Liveness.HoldEnds))
+
+  test("a hold that came due while faults ran has until they stop, plus the lag"):
+    val healed = 10 + HoldTimeout * 1_000_000_000L + 5_000_000_000L
+    val lateButFine = HistoryBuilder().ledger(hold, 10).copy(scannedAt = healed * 2, healedAt = Some(healed), expiries = Some(Map(a -> (healed + 1))))
+    assertEquals(broken(lateButFine), Set.empty[String])
+    val tooLate = lateButFine.copy(expiries = Some(Map(a -> (healed + 1_000_000_001L))))
+    assertEquals(broken(tooLate), Set(Liveness.HoldEnds))
+    assertEquals(broken(lateButFine.copy(expiries = Some(Map.empty))), Set(Liveness.HoldEnds))
 
   test(Liveness.ThroughputFloor):
     val h = (0 until 10).foldLeft(HistoryBuilder())((b, i) => b.received(i * 100L, auth, Reply.Decided(Approved)))

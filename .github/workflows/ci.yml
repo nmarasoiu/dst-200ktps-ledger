@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 25
+      - uses: sbt/setup-sbt@v1
+      - uses: coursier/cache-action@v6
+      # GitHub sets CI, so a contract suite that cannot reach Docker fails here instead of going unrun.
+      - run: sbt -batch testFull

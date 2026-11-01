@@ -20,6 +20,8 @@ class CallerSuite extends ScalaCheckSuite:
     val steps = run(Seq(Event.Replied(Reply.TimedOut), Event.Lost, Event.Replied(Reply.Retry), Event.Replied(Reply.Decided(CancelOutcome.Cancelled))))
     assertEquals(sent(steps), Vector(auth, Request.Cancel(k), Request.Cancel(k), Request.Cancel(k)))
     assertEquals(steps.last.state.phase, Phase.Done)
+    assertEquals(steps(1).marks, Vector(Mark.CallerCancelsAfterNonDefinitive))
+    assertEquals(steps(2).marks, Vector(Mark.CallerResendsCancel))
 
   test("section 5: a lost reply is a timeout from the caller's view, so the caller cancels"):
     assertEquals(sent(run(Seq(Event.Lost))), Vector(auth, Request.Cancel(k)))
@@ -28,11 +30,19 @@ class CallerSuite extends ScalaCheckSuite:
     val steps = run(Seq(Event.Replied(Reply.Refused(RefusalReason.Overload)), Event.Resend, Event.Replied(Reply.Decided(AuthOutcome.Approved))))
     assertEquals(sent(steps), Vector(auth, auth))
     assertEquals(steps.last.state.phase, Phase.Approved)
+    assertEquals(steps(2).marks, Vector(Mark.CallerResendsRefused))
 
   test("section 8: a capture follows an approval, and is resent with the same key until answered"):
     val half = CaptureAmount.Partial(50)
     val steps = run(Seq(Event.Replied(Reply.Decided(AuthOutcome.Approved)), Event.Capture(half), Event.Replied(Reply.Retry), Event.Lost))
     assertEquals(sent(steps), Vector(auth, Request.Capture(k, half), Request.Capture(k, half), Request.Capture(k, half)))
+    assertEquals(steps.last.marks, Vector(Mark.CallerResendsCapture))
+
+  test("section 5: a hold is abandoned: an approved caller stops, and TigerBeetle's timeout is what ends the hold"):
+    val steps = run(Seq(Event.Replied(Reply.Decided(AuthOutcome.Approved)), Event.Stop))
+    assertEquals(sent(steps), Vector(auth))
+    assertEquals(steps.last.state.phase, Phase.Done)
+    assertEquals(steps.last.marks, Vector(Mark.CallerAbandonedHold))
 
   test("section 5: a capture can only follow an approval"):
     val steps = run(Seq(Event.Capture(CaptureAmount.Full)))

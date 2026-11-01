@@ -86,5 +86,15 @@ class MergeSuite extends ScalaCheckSuite:
   test("captured, then refused as cancelled, is a conflict"):
     assert(merged(Captured(half), CaptureRefused(CaptureRefusal.Cancelled)).conflicts.nonEmpty)
 
+  test("a full capture beside a partial of the whole hold is one capture, and the partial says how much"):
+    val whole = CaptureAmount.Partial(100)
+    val hold = Merge.fold(Vector(a -> Captured(CaptureAmount.Full), a -> Captured(whole)))(a)
+    assertEquals(hold.captureDecision, Right(Some(Captured(whole))))
+    assertEquals(hold.conflicts, Vector.empty)
+
+  test("two different partial captures still conflict"):
+    val hold = Merge.fold(Vector(a -> Captured(CaptureAmount.Partial(10)), a -> Captured(CaptureAmount.Partial(20))))(a)
+    assert(hold.captureDecision.isLeft)
+
   test("an approved hold with nothing after it is open"):
     assertEquals(merged(Approved).ending, Right(Ending.Open))

@@ -26,7 +26,7 @@ enum CallerRecord derives CanEqual:
   def at: HistoryTime
   def request: Request
 
-/** A command log record. `at` is when its writer had it acknowledged, in history time; in real runs, its append
+/** A command log record. `at` is when it landed, in history time, whatever its writer heard; in real runs, its append
   * time.
   */
 final case class LogRecord(partition: Partition, offset: Offset, at: HistoryTime, record: Record) derives CanEqual
@@ -38,7 +38,10 @@ final case class LogRecord(partition: Partition, offset: Offset, at: HistoryTime
 final case class EdgeRecord(instance: Int, at: HistoryTime, request: Request, arrived: EdgeTime, answered: Option[(EdgeTime, Reply)])
     derives CanEqual
 
-/** A transfer from the scan of one cluster, with TigerBeetle's timestamp in nanoseconds. */
+/** A transfer from the scan of one cluster, as TigerBeetle recorded it, with its timestamp in nanoseconds. A post
+  * or a void carries the hold's accounts, ledger and code, and the amount it moved, never the maximum a full capture
+  * sends (README section 6).
+  */
 final case class LedgerTransfer(cluster: Period, transfer: Transfer, timestamp: Long) derives CanEqual:
   def id: TransferId = transfer.id
 
@@ -56,13 +59,15 @@ final case class LedgerAccount(
 
 /** What TigerBeetle holds at the end of a run. `scannedAt` is each cluster's timestamp at the scan. `expiries` are
   * the holds TigerBeetle expired, with when, if the run observed them, as the simulator does; a scan cannot see
-  * them, so real runs infer them from each hold's timestamp and timeout (README section 12, gap 4).
+  * them, so real runs infer them from each hold's timestamp and timeout (README section 12, gap 4). `healedAt` is each
+  * cluster's timestamp when faults stopped, if the run knows it: a cluster that was away expires its holds late.
   */
 final case class LedgerSnapshot(
     transfers: Vector[LedgerTransfer],
     accounts: Vector[LedgerAccount],
     scannedAt: Map[Period, Long],
     expiries: Option[Map[TransferId, Long]],
+    healedAt: Map[Period, Long] = Map.empty,
 ) derives CanEqual:
   private lazy val byId: Map[TransferId, Vector[LedgerTransfer]] = transfers.groupBy(_.id)
   private lazy val byPending: Map[TransferId, Vector[LedgerTransfer]] =
@@ -80,9 +85,6 @@ final case class LedgerSnapshot(
     case Some(seen) => seen.contains(hold.id)
     case None => hold.expiresAt.exists(at => scannedAt.get(hold.cluster).exists(at <= _))
 
-  /** The amount a post moved: the full hold when it asked for the maximum (README section 6). */
-  def postedAmount(post: LedgerTransfer, hold: LedgerTransfer): U128 =
-    if post.transfer.amount.isMax then hold.transfer.amount else post.transfer.amount
 
 /** A broken invariant or property, named as README section 11 states it. */
 final case class Violation(property: String, detail: String) derives CanEqual

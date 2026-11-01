@@ -47,7 +47,8 @@ object Caller:
       case (AwaitAuthorization, Replied(_) | Lost) => cancel(s).mark(Mark.CallerCancelsAfterNonDefinitive)
 
       case (Refused, Resend) => Step(s.copy(phase = AwaitAuthorization), Vector(Effect.Send(s.authorization)), Vector(Mark.CallerResendsRefused))
-      case (Refused | Approved, Stop) => Step(s.copy(phase = Done))
+      case (Refused, Stop) => Step(s.copy(phase = Done))
+      case (Approved, Stop) => Step(s.copy(phase = Done), marks = Vector(Mark.CallerAbandonedHold))
 
       case (Approved, Capture(amount)) =>
         Step(s.copy(phase = Capturing(amount)), Vector(Effect.Send(Request.Capture(s.key, amount))))
