@@ -69,3 +69,24 @@ object Ledger:
     * section 12, gap 4). No machine reads it.
     */
   final case class Scan(cluster: Period, after: Long, limit: Int) derives CanEqual
+
+  /** Accounts to set up in a cluster, such as the two fence accounts (README section 8, the cost). Setting up an
+    * account again with the same fields changes nothing. No machine does this.
+    */
+  final case class CreateAccounts(cluster: Period, accounts: Vector[NewAccount]) derives CanEqual
+
+  final case class NewAccount(
+      id: AccountId,
+      ledger: Int,
+      code: Int,
+      debitsMustNotExceedCredits: Boolean = false,
+      creditsMustNotExceedDebits: Boolean = false,
+  ) derives CanEqual
+
+  /** Read the balances of accounts: how a hold's expiry shows from outside, since a scan cannot see it (README
+    * section 12, gap 4). No machine does this.
+    */
+  final case class LookupAccounts(cluster: Period, ids: Vector[AccountId]) derives CanEqual
+
+  final case class Balances(id: AccountId, debitsPending: U128, debitsPosted: U128, creditsPending: U128, creditsPosted: U128)
+      derives CanEqual
