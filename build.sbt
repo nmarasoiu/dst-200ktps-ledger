@@ -58,6 +58,8 @@ lazy val contractTests = (project in file("contract-tests"))
       "org.scalameta" %% "munit" % "1.3.6" % Test,
       "org.typelevel" %% "munit-cats-effect" % "2.2.1" % Test,
       "org.testcontainers" % "testcontainers" % "2.0.5" % Test,
+      "org.testcontainers" % "testcontainers-kafka" % "2.0.5" % Test,
+      "org.apache.kafka" % "kafka-clients" % "4.3.2" % Test,
       "org.slf4j" % "slf4j-nop" % "2.0.17" % Test,
     ),
   )
