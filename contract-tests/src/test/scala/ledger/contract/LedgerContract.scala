@@ -385,6 +385,20 @@ abstract class LedgerContract extends CatsEffectSuite:
       _ <- ledger.lookupAccounts(Vector(newId())).assertEquals(Vector.empty)
     yield ()
 
+  test("a closed account refuses a post and a new hold, burning their IDs, and still lets a void release a hold"):
+    val (posted, voided, late) = (key(), key(), key())
+    for
+      pair <- accounts()
+      _ <- submit(authorization(posted, pair), authorization(voided, pair)).assertEquals(Vector(Created, Created))
+      _ <- ledger.closeAccount(pair.debit, pair.credit, AccountLedger, AccountCode)
+      _ <- submit(post(posted, CaptureAmount.Full)).assertEquals(Vector(DebitAccountAlreadyClosed))
+      _ <- submit(post(posted, CaptureAmount.Full)).assertEquals(Vector(IdAlreadyFailed))
+      _ <- submit(authorization(late, pair)).assertEquals(Vector(DebitAccountAlreadyClosed))
+      _ <- submit(authorization(late, pair)).assertEquals(Vector(IdAlreadyFailed))
+      _ <- cancel(voided).assertEquals(Vector(ExistsWithDifferentFlags, Created))
+      _ <- debits(pair).assertEquals((100L, 0L))
+    yield ()
+
   // The capture table of README section 8, each row replayed once. Timeouts, expiry and posts.
 
   test("a live hold: a full capture posts it all, and a replay returns exists"):

@@ -102,7 +102,7 @@ class SimTigerBeetleSuite extends munit.FunSuite:
     val snapshot = tb.snapshot
     assertEquals(snapshot.accounts.map(_.id), Vector(debit, credit, cfg.fenceDebit, cfg.fenceCredit))
     assertEquals(snapshot.expiries.map(_.keySet), Some(Set(Ids.authorization(key(3)))))
-    assertEquals(snapshot.postedAmount(snapshot.posts(a).head, snapshot.pending(a).get), U128.of(40))
+    assertEquals(snapshot.posts(a).map(_.transfer.amount), Vector(U128.of(40)))
     assertEquals(snapshot.scannedAt.keySet, Set(Period(0)))
     val history = History(Vector.empty, Vector.empty, Vector.empty, snapshot, None, HistoryTime(0))
     assertEquals(Invariants.check(history), Vector.empty)

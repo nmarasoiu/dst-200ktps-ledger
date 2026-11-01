@@ -37,6 +37,9 @@ final class SimTigerBeetle(cluster: Period):
           accounts(a.id) = Account(a)
           accountOrder += a.id
 
+  /** Refuses new movements on the account, apart from voids. */
+  def closeAccount(id: AccountId): Unit = accounts(id).closed = true
+
   /** One request's events, in order: later events see what earlier ones did, and a transient failure burns its ID. */
   def createTransfers(now: Long, batch: Vector[Transfer]): Vector[TbStatus] =
     val last = math.max(now, commitTimestamp + batch.size)
@@ -119,6 +122,8 @@ final class SimTigerBeetle(cluster: Period):
         case (Some(dr), Some(cr)) =>
           if dr.fields.ledger != cr.fields.ledger then AccountsMustHaveTheSameLedger
           else if t.ledger != dr.fields.ledger then TransferMustHaveTheSameLedgerAsAccounts
+          else if dr.closed then DebitAccountAlreadyClosed
+          else if cr.closed then CreditAccountAlreadyClosed
           else
             val amount = t.amount.toBigInt
             overflowOrLimit(t, amount, dr, cr).getOrElse:
@@ -178,6 +183,8 @@ final class SimTigerBeetle(cluster: Period):
           val heldAt = transfers(p.id).timestamp
           val expiresAt = heldAt + p.timeoutSeconds * NanosPerSecond
           if p.timeoutSeconds > 0 && expiresAt <= timestamp then PendingTransferExpired
+          else if t.isPost && accounts(p.debit).closed then DebitAccountAlreadyClosed
+          else if t.isPost && accounts(p.credit).closed then CreditAccountAlreadyClosed
           else
             if p.timeoutSeconds > 0 then expiring -= ((expiresAt, heldAt, p.id))
             closings(p.id) = if t.isPost then Closing.Posted else Closing.Voided
@@ -238,6 +245,7 @@ object SimTigerBeetle:
     var debitsPosted = BigInt(0)
     var creditsPending = BigInt(0)
     var creditsPosted = BigInt(0)
+    var closed = false
 
     def balances: Ledger.Balances = Ledger.Balances(
       fields.id,

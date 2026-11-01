@@ -58,5 +58,7 @@ object RealTigerBeetle:
     def submit(transfers: Vector[Transfer]): IO[Ledger.Result] = tb.submit(Ledger.Submit(Cluster, transfers))
     def scan(after: Long, limit: Int): IO[Vector[LedgerTransfer]] = tb.scan(Ledger.Scan(Cluster, after, limit))
     def lookupAccounts(ids: Vector[AccountId]): IO[Vector[Ledger.Balances]] = tb.lookupAccounts(Ledger.LookupAccounts(Cluster, ids))
+    def closeAccount(id: AccountId, other: AccountId, ledger: Int, code: Int): IO[Unit] =
+      tb.closeAccount(Ledger.CloseAccount(Cluster, id, other, ledger, code))
     def passTime(d: FiniteDuration): IO[Unit] = IO.sleep(d)
     def elapsed: IO[FiniteDuration] = IO.monotonic

@@ -30,11 +30,18 @@ final class TigerBeetle private (clients: Map[Period, Client]):
       .map(results => Ledger.Result.Returned(decodeStatuses(results)))
       .recover { case NonFatal(_) => Ledger.Result.Failed }
 
+  /** An account's closing transfer is an operator's, not the pipeline's, so the feed leaves it out. A page of nothing
+    * else reads on, since an empty page means the end.
+    */
   def scan(call: Ledger.Scan): IO[Vector[LedgerTransfer]] =
     val filter = new QueryFilter
     filter.setTimestampMin(call.after + 1)
     filter.setLimit(call.limit)
-    awaited(clients(call.cluster).queryTransfersAsync(filter)).map(decodeTransfers(call.cluster, _))
+    awaited(clients(call.cluster).queryTransfersAsync(filter)).flatMap: batch =>
+      val (kept, last) = decodeTransfers(call.cluster, batch)
+      last match
+        case Some(timestamp) if kept.isEmpty => scan(call.copy(after = timestamp))
+        case _ => IO.pure(kept)
 
   def createAccounts(call: Ledger.CreateAccounts): IO[Unit] =
     val batch = new AccountBatch(call.accounts.size)
@@ -52,6 +59,22 @@ final class TigerBeetle private (clients: Map[Period, Client]):
       statuses.result().filterNot(ok).toList match
         case Nil => IO.unit
         case bad => IO.raiseError(IllegalStateException(s"accounts not set up: $bad"))
+
+  /** A zero-amount pending transfer that closes the account, with no timeout, so it stays closed. */
+  def closeAccount(call: Ledger.CloseAccount): IO[Unit] =
+    val batch = new TransferBatch(1)
+    batch.add()
+    val id = java.util.UUID.nameUUIDFromBytes(call.id.value.bytes)
+    batch.setId(UInt128.asBytes(id))
+    batch.setDebitAccountId(call.id.value.lo, call.id.value.hi)
+    batch.setCreditAccountId(call.other.value.lo, call.other.value.hi)
+    batch.setLedger(call.ledger)
+    batch.setCode(call.code)
+    batch.setFlags(TransferFlags.PENDING | TransferFlags.CLOSING_DEBIT)
+    awaited(clients(call.cluster).createTransfersAsync(batch)).flatMap: results =>
+      val statuses = decodeStatuses(results)
+      if statuses == Vector(TbStatus.Created) then IO.unit
+      else IO.raiseError(IllegalStateException(s"account not closed: $statuses"))
 
   def lookupAccounts(call: Ledger.LookupAccounts): IO[Vector[Ledger.Balances]] =
     val ids = new IdBatch(call.ids.size)
@@ -138,19 +161,23 @@ object TigerBeetle:
       statuses += statusOf(code).getOrElse(throw IllegalStateException(s"a status the core does not know: $code"))
     statuses.result()
 
-  private def decodeTransfers(cluster: Period, batch: TransferBatch): Vector[LedgerTransfer] =
+  /** The transfers the pipeline wrote, and the last timestamp read. */
+  private def decodeTransfers(cluster: Period, batch: TransferBatch): (Vector[LedgerTransfer], Option[Long]) =
     val transfers = Vector.newBuilder[LedgerTransfer]
+    var last = Option.empty[Long]
     while batch.next() do
-      val transfer = Transfer(
-        TransferId(u128(batch.getId(UInt128.LeastSignificant), batch.getId(UInt128.MostSignificant))),
-        AccountId(u128(batch.getDebitAccountId(UInt128.LeastSignificant), batch.getDebitAccountId(UInt128.MostSignificant))),
-        AccountId(u128(batch.getCreditAccountId(UInt128.LeastSignificant), batch.getCreditAccountId(UInt128.MostSignificant))),
-        u128(batch.getAmount(UInt128.LeastSignificant), batch.getAmount(UInt128.MostSignificant)),
-        TransferId(u128(batch.getPendingId(UInt128.LeastSignificant), batch.getPendingId(UInt128.MostSignificant))),
-        batch.getLedger,
-        batch.getCode,
-        decodeFlags(batch.getFlags),
-        batch.getTimeout,
-      )
-      transfers += LedgerTransfer(cluster, transfer, batch.getTimestamp)
-    transfers.result()
+      last = Some(batch.getTimestamp)
+      if (batch.getFlags & TransferFlags.CLOSING_DEBIT) == 0 then
+        val transfer = Transfer(
+          TransferId(u128(batch.getId(UInt128.LeastSignificant), batch.getId(UInt128.MostSignificant))),
+          AccountId(u128(batch.getDebitAccountId(UInt128.LeastSignificant), batch.getDebitAccountId(UInt128.MostSignificant))),
+          AccountId(u128(batch.getCreditAccountId(UInt128.LeastSignificant), batch.getCreditAccountId(UInt128.MostSignificant))),
+          u128(batch.getAmount(UInt128.LeastSignificant), batch.getAmount(UInt128.MostSignificant)),
+          TransferId(u128(batch.getPendingId(UInt128.LeastSignificant), batch.getPendingId(UInt128.MostSignificant))),
+          batch.getLedger,
+          batch.getCode,
+          decodeFlags(batch.getFlags),
+          batch.getTimeout,
+        )
+        transfers += LedgerTransfer(cluster, transfer, batch.getTimestamp)
+    (transfers.result(), last)

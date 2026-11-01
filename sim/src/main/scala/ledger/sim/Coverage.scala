@@ -51,7 +51,7 @@ object Coverage:
         AdmissionRetryNoLeader | AdmissionRetryOverload | AdmissionCancelDuringOverload | ResolverFencedAuthorization |
         ResolverResubmittedCancel | ResolverResubmittedCapture | ResolverJudgedIdlePartition | ResolverFoundOutcome |
         ResolverOutcomeWhileInFlight | ResolverStaleResult | ResolverRetryScheduled | ResolverRevoked |
-        ResolverRedelivered | CallerCancelsAfterNonDefinitive | CallerResendsRefused | CallerResendsCancel |
+        CallerCancelsAfterNonDefinitive | CallerResendsRefused | CallerResendsCancel |
         CallerResendsCapture | CallerAbandonedHold | CallerIgnoredOutOfTurn =>
       Some(Faults)
     // A caller that keeps its contracts gets at most one copy of an authorization to TigerBeetle, and captures only
@@ -64,7 +64,9 @@ object Coverage:
         CancelUnresolved | CaptureRejected =>
       Some(MisconfiguredLedger)
     case EdgeRefusedPeriodNotStarted | EdgePeriodEndedFencePath => Some(PeriodSwitch)
-    case AuthorizationUnresolved | CaptureUnresolved => None
+    // The first two are results no correct ledger gives. The third is a record read again within one assignment,
+    // which no correct consumer does: a new assignment reads from its commit under a new generation.
+    case AuthorizationUnresolved | CaptureUnresolved | ResolverRedelivered => None
 
   /** The marks a run of seeds in this scenario must hit. */
   def required(s: Scenario): Set[Mark] = Mark.values.filter(scenarioOf(_).contains(s)).toSet
