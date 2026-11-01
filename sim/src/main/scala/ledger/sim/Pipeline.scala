@@ -1,6 +1,7 @@
 package ledger.sim
 
 import ledger.core.*
+import ledger.sim.Coverage.Scenario
 import scala.collection.mutable
 import scala.concurrent.duration.*
 
@@ -22,6 +23,8 @@ object Pipeline:
     case Cluster
 
   final case class Config(
+      /** What the run does beyond faults, which every scenario has (README section 11, coverage marks). */
+      scenario: Scenario = Scenario.Faults,
       edges: Int = 3,
       resolvers: Int = 2,
       partitions: Int = 4,
@@ -87,6 +90,18 @@ object Pipeline:
     case LedgerArrives(submit: Ledger.Submit, reply: LedgerReply, noFence: Boolean = false)
     case Pulse
     case GroupTick
+    case CloseAccount(id: AccountId)
+    /** A caller that breaks its contracts, beside the machine that keeps them. */
+    case Rogue(key: Int, kind: Int)
+    case RogueSend(request: Request)
+    case RogueHeard(request: Request, reply: Reply)
+
+  /** The ways a ledger can be set up wrong. */
+  private enum Misconfiguration derives CanEqual:
+    case FenceAccountsMissing, FenceFieldsDiffer, FenceInvalid, AccountClosed
+
+  /** A connection opened by a rogue caller, which no machine waits on. */
+  private val RogueKey = -1
 
   private enum LogReply derives CanEqual:
     case ToEdgeRef(instance: Int, life: Incarnation, ref: Edge.Ref, record: Record)
@@ -95,12 +110,12 @@ object Pipeline:
   private enum LedgerReply derives CanEqual:
     case ToEdgeRef(instance: Int, life: Incarnation, ref: Edge.Ref)
     case ToResolverRef(instance: Int, life: Incarnation, ref: Resolver.Ref)
+    case Nobody
 
   /** A request a caller has open on an edge's connection. `record` indexes the edge's record of it. */
   private final case class Open(key: Int, seq: Long, record: Int)
 
-  private final class KeyState(val state: Caller.State):
-    var current: Caller.State = state
+  private final class KeyState(var current: Caller.State):
     var seq: Long = 0L
     var answered: Boolean = true
     var request: Option[Request] = None
@@ -116,34 +131,48 @@ object Pipeline:
     private val marks = new MarkCounts
     private val trace = new Trace(keepTrace)
     private val kafka = new SimKafka(cfg.partitions, MemberTimeout.toMillis)
-    private val cluster = Period(0)
-    private val ledger = new SimTigerBeetle(cluster)
+
+    private val schedule =
+      if cfg.scenario == Scenario.PeriodSwitch then PeriodSchedule(Vector(WallTime(BaseWall + rng.between(3000, 12000)))) else PeriodSchedule.Single
+    private val ledgers = Vector.tabulate(schedule.switches.size + 1)(i => new SimTigerBeetle(Period(i)))
+
+    private val misconfiguration =
+      if cfg.scenario == Scenario.MisconfiguredLedger then Some(rng.pick(Misconfiguration.values.toVector)) else None
+
+    /** What an instance puts in its fences. An instance is told apart by `who`, so instances can disagree. */
+    private def fencedBy(who: Int): LedgerConfig = misconfiguration match
+      case Some(Misconfiguration.FenceAccountsMissing) => ledgerConfig.copy(fenceDebit = AccountId.of(9100))
+      case Some(Misconfiguration.FenceFieldsDiffer) => ledgerConfig.copy(fenceCode = 90 + who)
+      case Some(Misconfiguration.FenceInvalid) => ledgerConfig.copy(fenceCode = 0)
+      case _ => ledgerConfig
 
     private val holdTimeoutSeconds = rng.pick(cfg.holdTimeouts)
-    private val requestConfig = EdgeRequest.Config(
-      deadline = Deadline,
-      handOffBudget = 1.second,
-      lateResultWait = 1.second,
-      holdTimeoutSeconds = holdTimeoutSeconds,
-      periods = PeriodSchedule.Single,
-      ledger = ledgerConfig,
+    private def edgeConfig(i: Int) = Edge.Config(
+      EdgeRequest.Config(
+        deadline = Deadline,
+        handOffBudget = 1.second,
+        lateResultWait = 1.second,
+        holdTimeoutSeconds = holdTimeoutSeconds,
+        periods = schedule,
+        ledger = fencedBy(i),
+      ),
+      Admission.Config(maxInFlight = 64, maxLedgerLatency = 800.millis, partitions = cfg.partitions),
     )
-    private val edgeConfig = Edge.Config(requestConfig, Admission.Config(maxInFlight = 64, maxLedgerLatency = 800.millis, partitions = cfg.partitions))
-    private val resolverConfig =
-      ResolverPartition.Config(Deadline, Grace, retryBackoff = 300.millis, PeriodSchedule.Single, ledgerConfig)
+    private def resolverConfig(i: Int) =
+      ResolverPartition.Config(Deadline, Grace, retryBackoff = 300.millis, schedule, fencedBy(cfg.edges + i))
 
     private val edgeMonotonic = Vector.fill(cfg.edges)(SkewedClock.chosen[Clock.Edge](rng, cfg.maxSkew))
     private val edgeWall = Vector.fill(cfg.edges)(SkewedClock[Clock.Wall](BaseWall + rng.between(-cfg.maxSkew.toMillis, cfg.maxSkew.toMillis)))
     private val edges = Vector.tabulate(cfg.edges): i =>
       new SimProcess[Edge.State, Edge.Event, Edge.Effect, Edge.Now](
-        Edge.machine(edgeConfig),
+        Edge.machine(edgeConfig(i)),
         at => Edge.Now(edgeMonotonic(i).read(at), edgeWall(i).read(at)),
         marks,
       )
 
     private val resolverClocks = Vector.fill(cfg.resolvers)(SkewedClock.chosen[Clock.Resolver](rng, cfg.maxSkew))
     private val resolvers = Vector.tabulate(cfg.resolvers): i =>
-      new SimProcess[Resolver.State, Resolver.Event, Resolver.Effect, ResolverTime](Resolver.machine(resolverConfig), resolverClocks(i).read, marks)
+      new SimProcess[Resolver.State, Resolver.Event, Resolver.Effect, ResolverTime](Resolver.machine(resolverConfig(i)), resolverClocks(i).read, marks)
     private val members = new Array[SimKafka.MemberId](cfg.resolvers)
 
     private val leaderClocks = Array.fill(cfg.partitions)(SkewedClock.chosen[Clock.Log](rng, cfg.maxSkew))
@@ -189,11 +218,12 @@ object Pipeline:
           Ledger.NewAccount(ledgerConfig.fenceDebit, ledgerConfig.fenceLedger, 90),
           Ledger.NewAccount(ledgerConfig.fenceCredit, ledgerConfig.fenceLedger, 90),
         )
-      ledger.createAccounts(ledgerNow, accounts)
-      val funding = funded.zipWithIndex.map: (id, i) =>
-        Transfer(TransferId(U128(1L, i.toLong + 1)), AccountId.of(4000), id, U128.of(20_000), TransferId.Zero, AccountLedger, 72, Set.empty, 0)
-      val statuses = ledger.createTransfers(ledgerNow, funding)
-      require(statuses.forall(_ == TbStatus.Created), s"funding failed: $statuses")
+      ledgers.zipWithIndex.foreach: (ledger, cluster) =>
+        val funding = funded.zipWithIndex.map: (id, i) =>
+          Transfer(TransferId(U128(cluster + 1L, i + 1L)), AccountId.of(4000), id, U128.of(20_000), TransferId.Zero, AccountLedger, 72, Set.empty, 0)
+        ledger.createAccounts(ledgerNow, accounts)
+        val statuses = ledger.createTransfers(ledgerNow, funding)
+        require(statuses.forall(_ == TbStatus.Created), s"funding failed: $statuses")
 
     private def ledgerTime(t: HistoryTime): Long = BaseLedgerNanos + t.millis * NanosPerMilli
     private def ledgerNow: Long = ledgerTime(loop.now)
@@ -210,6 +240,8 @@ object Pipeline:
       loop.after(PulseEvery, Ev.Pulse)
       loop.after(GroupTickEvery, Ev.GroupTick)
       loop.after(nextArrival(), Ev.NewKey(0))
+      if misconfiguration.contains(Misconfiguration.AccountClosed) then
+        loop.schedule(HistoryTime(rng.between(2000, 8000)), Ev.CloseAccount(rng.pick(funded)))
       loop.run(cfg.endAt): event =>
         trace.record(loop.now, event)
         handle(event)
@@ -217,14 +249,35 @@ object Pipeline:
         callerRecords.result(),
         logRecords.result(),
         edgeRecords.toVector,
-        ledger.snapshot.copy(healedAt = Map(cluster -> ledgerTime(cfg.faults.stopAt))),
+        snapshot,
         Some(cfg.faults.stopAt),
         cfg.endAt,
       )
       val raised = alarms.result()
-      val alarmed = raised.distinct.map(a => Violation(AlarmProperty, a.toString))
-      val violations = Invariants.check(history) ++ Liveness.check(history, bounds) ++ alarmed
+      val alarmed = raised.distinct.filterNot(allowed).map(a => Violation(AlarmProperty, a.toString))
+      // A misconfigured ledger is promised safety only: a fence it cannot take leaves its commands without an end.
+      val liveness = if misconfiguration.isEmpty then Liveness.check(history, bounds) else Vector.empty
+      val safety = if cfg.scenario == Scenario.ContractBreakingCaller then Invariants.check(history) else Invariants.checkKeptContracts(history)
+      val violations = safety ++ liveness ++ alarmed
       Run(RunResult(violations, marks, trace.fingerprint), history, raised, trace.lines)
+
+    private def snapshot: LedgerSnapshot =
+      val all = ledgers.map(_.snapshot)
+      LedgerSnapshot(
+        all.flatMap(_.transfers),
+        all.flatMap(_.accounts),
+        all.flatMap(_.scannedAt).toMap,
+        Some(all.flatMap(_.expiries.getOrElse(Map.empty)).toMap),
+        ledgers.indices.map(i => Period(i) -> ledgerTime(cfg.faults.stopAt)).toMap,
+      )
+
+    private def allowed(alarm: Alarm): Boolean = cfg.scenario match
+      case Scenario.Faults | Scenario.PeriodSwitch => false
+      case Scenario.MisconfiguredLedger => true
+      case Scenario.ContractBreakingCaller =>
+        alarm match
+          case _: Alarm.KeyReused => true
+          case _ => false
 
     private def targets: Vector[Target] =
       edges.indices.toVector.map(Target.EdgeInstance(_)) ++ resolvers.indices.toVector.map(Target.ResolverInstance(_)) ++
@@ -249,8 +302,12 @@ object Pipeline:
       case Ev.LogArrives(append, reply) => logArrives(append, reply)
       case Ev.LedgerArrives(submit, reply, noFence) => ledgerArrives(submit, reply, noFence)
       case Ev.Pulse =>
-        if ledgerUp then ledger.pulse(ledgerNow)
+        if ledgerUp then ledgers.foreach(_.pulse(ledgerNow))
         loop.after(PulseEvery, Ev.Pulse)
+      case Ev.CloseAccount(id) => ledgers.foreach(_.closeAccount(id))
+      case Ev.Rogue(key, kind) => rogue(key, kind)
+      case Ev.RogueSend(request) => rogueSend(request)
+      case Ev.RogueHeard(request, reply) => rogueHeard(request, reply)
       case Ev.GroupTick =>
         kafka.expireMembers(loop.now.millis)
         loop.after(GroupTickEvery, Ev.GroupTick)
@@ -313,7 +370,11 @@ object Pipeline:
       val started = Caller.start(authorization)
       keys += new KeyState(started.state)
       carryOut(keys.size - 1, started)
+      if cfg.scenario == Scenario.ContractBreakingCaller && rng.chance(0.4) then
+        loop.after(millis(0, 6000), Ev.Rogue(keys.size - 1, rng.between(0, 7).toInt))
       if loop.now < cfg.lastArrival then loop.after(nextArrival(), Ev.NewKey(index + 1))
+
+    private def resendsInstead: Boolean = planted.contains(Planted.CallerTrustsAResend)
 
     private def step(key: Int, e: Caller.Event): Unit =
       carryOut(key, Caller.step(keys(key).current, e))
@@ -328,8 +389,9 @@ object Pipeline:
           case Caller.Effect.Send(request) =>
             k.seq += 1
             k.answered = false
-            k.request = Some(request)
-            loop.after(millis(0, 150), Ev.Send(key, k.seq, request))
+            val sent = if resendsInstead && request.kind == Kind.Cancel then k.current.authorization else request
+            k.request = Some(sent)
+            loop.after(millis(0, 150), Ev.Send(key, k.seq, sent))
       choose(key)
 
     /** What the machine leaves to the caller, once it is the caller's move. */
@@ -365,21 +427,69 @@ object Pipeline:
           loop.after(millis(100, 400), Ev.Reaches(rng.between(0, cfg.edges - 1).toInt, key, seq, request))
         else loop.after(hop(), Ev.Reaches(edge, key, seq, request))
 
+    // The caller that breaks its contracts, in the ways the ledger settles safely (README section 11, coverage marks).
+
+    private val rogueCancelsAnswered = mutable.HashSet.empty[ClientKey]
+
+    private def rogue(key: Int, kind: Int): Unit =
+      val authorization = keys(key).current.authorization
+      def freshKey = ClientKey(callerWall.read(loop.now), s"rogue-$key")
+      def now(request: Request): Unit = loop.after(Duration.Zero, Ev.RogueSend(request))
+      def later(request: Request): Unit = loop.after(millis(200, 1500), Ev.RogueSend(request))
+      kind match
+        case 0 => now(authorization)
+        case 1 => now(authorization.copy(amount = U128.of(authorization.amount.lo + 1)))
+        case 2 => now(authorization.copy(key = freshKey, ledger = 0))
+        case 3 => now(Request.Capture(authorization.key, CaptureAmount.Full))
+        case 4 => now(Request.Capture(authorization.key, CaptureAmount.Partial(1)))
+        case 5 => now(Request.Cancel(authorization.key))
+        case 6 =>
+          val noHold = Request.Capture(freshKey, CaptureAmount.Full)
+          now(noHold)
+          later(noHold)
+        case _ =>
+          val fenced = freshKey
+          now(Request.Cancel(fenced))
+          later(Request.Capture(fenced, CaptureAmount.Full))
+
+    private def rogueSend(request: Request): Unit =
+      val cancelSettled = request match
+        case c: Request.Cancel => rogueCancelsAnswered(c.key)
+        case _ => false
+      if !cancelSettled then
+        callerRecords += CallerRecord.Sent(loop.now, request)
+        if !lost() then loop.after(hop(), Ev.Reaches(rng.between(0, cfg.edges - 1).toInt, RogueKey, 0L, request))
+        // Even this caller keeps its cancels going, or nothing could say they are acknowledged.
+        if request.kind == Kind.Cancel then loop.after(CallerTimeout, Ev.RogueSend(request))
+
+    private def rogueHeard(request: Request, reply: Reply): Unit =
+      callerRecords += CallerRecord.Received(loop.now, request, reply)
+      (request, reply) match
+        case (c: Request.Cancel, Reply.Decided(_)) => rogueCancelsAnswered += c.key
+        case _ =>
+
     private def heard(key: Int, seq: Long, reply: Reply): Unit =
       val k = keys(key)
       if k.seq == seq && !k.answered then
         k.answered = true
         callerRecords += CallerRecord.Received(loop.now, k.request.get, reply)
-        step(key, Caller.Event.Replied(reply))
+        (reply, k.current.phase) match
+          case (Reply.Decided(AuthOutcome.Approved), Caller.Phase.Cancelling) if resendsInstead =>
+            k.current = k.current.copy(phase = Caller.Phase.Approved)
+            choose(key)
+          case (Reply.Decided(_), Caller.Phase.Cancelling) if resendsInstead =>
+            k.current = k.current.copy(phase = Caller.Phase.Done)
+          case _ => step(key, Caller.Event.Replied(reply))
       // A reply after the key is over changes nothing, whatever it says. The machine is what makes sure of that.
       else if k.current.phase == Caller.Phase.Done then step(key, Caller.Event.Replied(reply))
 
     private def gaveUp(key: Int, seq: Long): Unit =
-      val k = keys(key)
-      if k.seq == seq && !k.answered then
-        k.answered = true
-        callerRecords += CallerRecord.Lost(loop.now, k.request.get)
-        step(key, Caller.Event.Lost)
+      if key != RogueKey then
+        val k = keys(key)
+        if k.seq == seq && !k.answered then
+          k.answered = true
+          callerRecords += CallerRecord.Lost(loop.now, k.request.get)
+          step(key, Caller.Event.Lost)
 
     // The edges.
 
@@ -400,10 +510,17 @@ object Pipeline:
         case Edge.Effect.Answer(connection, reply) =>
           open.remove((i, connection)).foreach: o =>
             val e = edgeRecords(o.record)
+            (e.request, reply) match
+              case (capture: Request.Capture, Reply.Retry) if planted.contains(Planted.EdgeCancelsWhenCaptureTimesOut) =>
+                val void = Vector(Transfers.void(capture.a))
+                loop.after(hop(), Ev.LedgerArrives(Ledger.Submit(schedule.periodOf(capture.key.createdAt), void), LedgerReply.Nobody))
+              case _ =>
             // A planted bug can sit on an answer; the instance's record shows when it really went.
             val held = if planted.contains(Planted.EdgeMissesItsDeadline) then 2.seconds else Duration.Zero
             edgeRecords(o.record) = e.copy(answered = Some((edgeMonotonic(i).read(loop.now + held), reply)))
-            if !lost() then loop.after(held + hop(), Ev.Heard(o.key, o.seq, reply))
+            if !lost() then
+              val back = if o.key == RogueKey then Ev.RogueHeard(e.request, reply) else Ev.Heard(o.key, o.seq, reply)
+              loop.after(held + hop(), back)
         case Edge.Effect.Append(ref, append) =>
           loop.after(hop(), Ev.LogArrives(append, LogReply.ToEdgeRef(i, life, ref, append.record)))
         case Edge.Effect.Submit(ref, submit) =>
@@ -470,6 +587,7 @@ object Pipeline:
     // call fails without statuses, and its effect is unknown.
 
     private def ledgerArrives(submit: Ledger.Submit, reply: LedgerReply, noFence: Boolean): Unit =
+      val ledger = ledgers(submit.cluster.index)
       if !ledgerUp then ledgerWaiting += ((submit, reply, noFence))
       else if lost() then
         if rng.chance(0.5) then
@@ -482,3 +600,4 @@ object Pipeline:
     private def ledgerReply(reply: LedgerReply, result: Ledger.Result): Unit = reply match
       case LedgerReply.ToEdgeRef(i, life, ref) => loop.after(hop(), Ev.ToEdge(i, life, Edge.Event.Returned(ref, result)))
       case LedgerReply.ToResolverRef(i, life, ref) => loop.after(hop(), Ev.ToResolver(i, life, Resolver.Event.Returned(ref, result)))
+      case LedgerReply.Nobody =>

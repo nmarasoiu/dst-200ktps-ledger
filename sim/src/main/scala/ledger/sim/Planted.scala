@@ -21,8 +21,12 @@ enum Planted(val caughtBy: String) derives CanEqual:
   case ResolverCommitsPastOutcomeless extends Planted(Liveness.CommandHasOutcome)
   /** A hop between the caller and the edge resends on its own after losing an answer (README section 5). */
   case HopResendsAnAuthorization extends Planted(Invariants.RefusalLeavesNoHold)
-  /** Voids a hold when a capture times out, so a hold is released with no cancel asked for. */
+  /** Voids a hold when it answers a capture "retry", so a hold is released with no cancel asked for. */
   case EdgeCancelsWhenCaptureTimesOut extends Planted(Invariants.WritesFollowCommands)
+  /** Resends the authorization instead of cancelling after a non-definitive result, and trusts the answer, though a
+    * voided authorization still returns `exists` (README section 12, follow-up 7).
+    */
+  case CallerTrustsAResend extends Planted(Invariants.ApprovalStands)
   /** Sends a full capture as amount 0, which posts nothing and releases the hold (README section 8, captures). */
   case CaptureSentAsZero extends Planted(Invariants.MatchesLedger)
   /** Fences a capture it finds without an outcome, though a capture is never fenced. */
@@ -60,8 +64,6 @@ object Planted:
       Vector(Edge.Effect.Answer(connection, Reply.Decided(outcome)), f)
     case (CaptureSentAsZero, Edge.Effect.Submit(ref, submit)) =>
       Vector(Edge.Effect.Submit(ref, submit.copy(transfers = submit.transfers.map(zeroIfFull))))
-    case (EdgeCancelsWhenCaptureTimesOut, Edge.Effect.Submit(ref, submit)) if submit.transfers.exists(_.isPost) =>
-      Vector(f, Edge.Effect.Submit(ref, submit.copy(transfers = Vector(Transfers.void(submit.transfers.head.pendingId)))))
     case _ => Vector(f)
 
   private def zeroIfFull(t: Transfer): Transfer = if t.isPost && t.amount.isMax then t.copy(amount = U128.Zero) else t

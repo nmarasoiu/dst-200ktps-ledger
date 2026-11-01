@@ -104,5 +104,8 @@ class SimTigerBeetleSuite extends munit.FunSuite:
     assertEquals(snapshot.expiries.map(_.keySet), Some(Set(Ids.authorization(key(3)))))
     assertEquals(snapshot.posts(a).map(_.transfer.amount), Vector(U128.of(40)))
     assertEquals(snapshot.scannedAt.keySet, Set(Period(0)))
+    // What a snapshot alone can answer: this history has no log and no callers.
     val history = History(Vector.empty, Vector.empty, Vector.empty, snapshot, None, HistoryTime(0))
-    assertEquals(Invariants.check(history), Vector.empty)
+    assertEquals(Invariants.noTransferAppliedTwice(history), Vector.empty)
+    assertEquals(Invariants.capturedAtMostOnce(history), Vector.empty)
+    assertEquals(Invariants.balancesWithinLimits(history), Vector.empty)
