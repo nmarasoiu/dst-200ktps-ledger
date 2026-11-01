@@ -43,6 +43,7 @@ class EdgeRequestSuite extends ScalaCheckSuite:
     val t = run(authorize(k), Seq(10L -> Event.CommandFailed))
     assertEquals(answers(t), Vector(Reply.Refused(RefusalReason.CommandNotAcknowledged)))
     assertEquals(submits(t), Vector.empty)
+    assert(marks(t).contains(Mark.EdgeRefusedCommandNotAcknowledged))
 
   test("section 5: the command is acknowledged too late for the ledger call and the outcome write: refused"):
     val t = run(authorize(k), Seq(1250L -> Event.CommandAcknowledged))
@@ -59,6 +60,13 @@ class EdgeRequestSuite extends ScalaCheckSuite:
     val t = run(authorize(k), Seq(10L -> Event.CommandAcknowledged, 20L -> Event.LedgerReturned(Vector(TbStatus.Created)), 30L -> Event.OutcomeFailed))
     assertEquals(answers(t), Vector(Reply.TimedOut))
     assert(effects(t).contains(Effect.StartCancel(k)))
+    assertEquals(marks(t).takeRight(2), Vector(Mark.EdgeTimedOutAuthorization, Mark.EdgeOutcomeNotAcknowledged))
+
+  test("section 5: the ledger call fails without results: answered as on a timeout, and the edge cancels"):
+    val t = run(authorize(k), Seq(10L -> Event.CommandAcknowledged, 20L -> Event.LedgerFailed))
+    assertEquals(answers(t), Vector(Reply.TimedOut))
+    assert(effects(t).contains(Effect.StartCancel(k)))
+    assertEquals(marks(t), Vector(Mark.EdgeTimedOutAuthorization, Mark.EdgeLedgerCallFailed))
 
   test("section 5: a paused edge finds the resolver's fence: declined, not_executed"):
     val t = run(authorize(k), Seq(10L -> Event.CommandAcknowledged, 20L -> Event.LedgerReturned(Vector(TbStatus.ExistsWithDifferentFlags)), 30L -> Event.OutcomeAcknowledged))
@@ -84,6 +92,7 @@ class EdgeRequestSuite extends ScalaCheckSuite:
     val t = run(Request.Capture(k, CaptureAmount.Full), Seq(10L -> Event.CommandAcknowledged, 1500L -> Event.TimeAdvanced))
     assertEquals(answers(t), Vector(Reply.Retry))
     assertEquals(effects(t).collect { case e: Effect.StartCancel => e }, Vector.empty)
+    assertEquals(marks(t), Vector(Mark.EdgeTimedOutRetry))
 
   test("section 8: a cancel is one call of the fence and the void, fence first"):
     val t = run(Request.Cancel(k), Seq(10L -> Event.CommandAcknowledged))

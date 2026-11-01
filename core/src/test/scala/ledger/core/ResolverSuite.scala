@@ -108,6 +108,7 @@ class ResolverSuite extends ScalaCheckSuite:
       Resolver.Event.Returned(Resolver.Ref(p0, auth.id, Generation(1)), Ledger.Result.Returned(Vector(TbStatus.Created))),
     ).scanLeft(assigned)((s, e) => Resolver.step(s.state, now, e, cfg))
     assertEquals(first(2).effects.collect { case Resolver.Effect.Submit(ref, _) => ref.generation }, Vector(Generation(1)))
+    assertEquals(first(3).marks, Vector(Mark.ResolverRevoked))
     assertEquals(first.last.effects, Vector.empty)
     assertEquals(first.last.marks, Vector(Mark.ResolverStaleResult))
 

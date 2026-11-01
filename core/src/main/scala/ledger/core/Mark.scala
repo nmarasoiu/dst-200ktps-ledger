@@ -148,5 +148,7 @@ enum Mark derives CanEqual:
   case CallerResendsRefused
   case CallerResendsCancel
   case CallerResendsCapture
+  /** An approved hold the caller leaves to expire (README section 5, a hold is abandoned). */
+  case CallerAbandonedHold
   /** An event the contract does not allow in this phase, ignored. */
   case CallerIgnoredOutOfTurn
