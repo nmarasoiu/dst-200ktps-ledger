@@ -12,10 +12,12 @@ object Invariants:
   val MatchesLedger = "Every decision matches the ledger"
   val RefusalLeavesNoHold = "If a caller stopped resending an authorization after a refusal, no hold was ever created for its key"
   val BalancesWithinLimits = "Balances never break their configured limits"
+  val WritesFollowCommands = "Every hold, void and post in the ledger follows a command in the log"
 
   def check(h: History): Vector[Violation] =
     noTransferAppliedTwice(h) ++ noTwoOutcomes(h) ++ cancelLeavesNoHold(h) ++ capturedAtMostOnce(h) ++
-      answeredAfterLogged(h) ++ decisionsMatchLedger(h) ++ refusalLeavesNoHold(h) ++ balancesWithinLimits(h)
+      answeredAfterLogged(h) ++ decisionsMatchLedger(h) ++ refusalLeavesNoHold(h) ++ balancesWithinLimits(h) ++
+      writesFollowCommands(h)
 
   /** Every outcome seen, by hold: logged by an edge or the resolver, or heard by a caller. */
   def outcomes(h: History): Vector[(TransferId, Outcome)] =
@@ -50,7 +52,7 @@ object Invariants:
       val posts = h.ledger.posts(hold.id)
       val twice = if posts.size > 1 then Vector(Violation(CaptureOnce, s"hold ${hold.id} was posted ${posts.size} times")) else Vector.empty
       val over = posts
-        .filter(p => Ordering[U128].gt(h.ledger.postedAmount(p, hold), hold.transfer.amount))
+        .filter(p => Ordering[U128].gt(p.transfer.amount, hold.transfer.amount))
         .map(p => Violation(CaptureOnce, s"hold ${hold.id} of ${hold.transfer.amount.toBigInt} was posted ${p.transfer.amount.toBigInt}"))
       twice ++ over
 
@@ -79,7 +81,7 @@ object Invariants:
         case CancelOutcome.CancelRefused if posts.isEmpty => broken("cancel_refused, but the hold was never posted")
         case _ => Vector.empty
       val capture = hold.captureDecision.toOption.flatten.toVector.flatMap:
-        case CaptureOutcome.Captured(amount) if !posts.exists(_.transfer.amount == Transfers.post(a, amount).amount) =>
+        case CaptureOutcome.Captured(amount) if !posts.exists(p => moved(amount, a, h).contains(p.transfer.amount)) =>
           broken(s"captured $amount, but the ledger has no such post")
         case CaptureOutcome.CaptureRefused(CaptureRefusal.Cancelled) if h.ledger.voids(a).isEmpty =>
           broken("capture refused as cancelled, but the hold was never voided")
@@ -87,6 +89,11 @@ object Invariants:
           broken("capture refused, but the hold was posted")
         case _ => Vector.empty
       authorization ++ cancel ++ capture
+
+  /** The amount a capture moves, as the ledger records it: all of the hold when it asked for all of it. */
+  private def moved(amount: CaptureAmount, a: TransferId, h: History): Option[U128] = amount match
+    case CaptureAmount.Full => h.ledger.pending(a).map(_.transfer.amount)
+    case CaptureAmount.Partial(n) => Some(U128.of(n))
 
   /** A key whose every authorization copy the caller sent came back refused, and was never resent after the last
     * refusal, has no hold. A hidden resend by a hop between the caller and the edge breaks it (README section 5).
@@ -104,6 +111,19 @@ object Invariants:
       if sent.nonEmpty && answers.size == sent.size && allRefused && h.ledger.pending(a).nonEmpty then
         Vector(Violation(RefusalLeavesNoHold, s"every authorization for $key was refused, yet the ledger holds $a"))
       else Vector.empty
+
+  /** TigerBeetle's timestamps are on another clock than the log's, so this asks only that the command exists. A
+    * transfer with no flags is left out: a fence looks like the setup's plain transfers, and the fence's own rules
+    * judge it.
+    */
+  def writesFollowCommands(h: History): Vector[Violation] =
+    val logged = h.log.collect { case LogRecord(_, _, _, Record.CommandRecord(c)) => c.id }.toSet
+    h.ledger.transfers.flatMap: t =>
+      val needed = t.transfer.flags.headOption.map:
+        case TransferFlag.Pending => CommandId(t.id, Kind.Authorization)
+        case TransferFlag.VoidPendingTransfer => CommandId(t.transfer.pendingId, Kind.Cancel)
+        case TransferFlag.PostPendingTransfer => CommandId(t.transfer.pendingId, Kind.Capture)
+      needed.filterNot(logged).map(id => Violation(WritesFollowCommands, s"${t.id} has no $id in the log"))
 
   /** Replays each cluster in timestamp order, with expiries, and checks every flagged account after each change. */
   def balancesWithinLimits(h: History): Vector[Violation] =
@@ -134,7 +154,7 @@ object Invariants:
       else if t.transfer.isVoid then holds.get(t.transfer.pendingId).toVector.flatMap(release)
       else if t.transfer.isPost then
         holds.get(t.transfer.pendingId).toVector.flatMap: hold =>
-          val posted = ledger.postedAmount(t, hold).toBigInt
+          val posted = t.transfer.amount.toBigInt
           release(hold) ++ Vector(hold.transfer.debit -> Empty.copy(debitsPosted = posted), hold.transfer.credit -> Empty.copy(creditsPosted = posted))
       else Vector(t.transfer.debit -> Empty.copy(debitsPosted = amount), t.transfer.credit -> Empty.copy(creditsPosted = amount))
     val expiries = holds.values.toVector.filterNot(hold => closed(hold.id)).flatMap: hold =>

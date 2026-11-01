@@ -88,5 +88,10 @@ object Ledger:
     */
   final case class LookupAccounts(cluster: Period, ids: Vector[AccountId]) derives CanEqual
 
+  /** Close an account, as an operator might under a live hold (README section 11, coverage marks). No machine does
+    * this.
+    */
+  final case class CloseAccount(cluster: Period, id: AccountId, other: AccountId, ledger: Int, code: Int) derives CanEqual
+
   final case class Balances(id: AccountId, debitsPending: U128, debitsPosted: U128, creditsPending: U128, creditsPosted: U128)
       derives CanEqual

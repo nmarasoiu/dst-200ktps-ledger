@@ -76,7 +76,8 @@ object Liveness:
         case (true, _, _) => Vector.empty
         case (false, None, _) => Vector(Violation(HoldEnds, s"hold ${hold.id} has no timeout and never ended"))
         case (false, Some(at), Some(seen)) =>
-          val due = at + b.expiryLag.toNanos
+          // Checked once faults stop, so a hold that came due while they ran has until then.
+          val due = h.ledger.healedAt.get(hold.cluster).fold(at)(at.max) + b.expiryLag.toNanos
           seen.get(hold.id) match
             case Some(expiredAt) if expiredAt > due => Vector(Violation(HoldEnds, s"hold ${hold.id} expired at $expiredAt, after $due"))
             case None if h.ledger.scannedAt.get(hold.cluster).exists(_ >= due) =>

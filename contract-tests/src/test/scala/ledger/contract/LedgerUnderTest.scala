@@ -10,6 +10,7 @@ trait LedgerUnderTest:
   def submit(transfers: Vector[Transfer]): IO[Ledger.Result]
   def scan(after: Long, limit: Int): IO[Vector[LedgerTransfer]]
   def lookupAccounts(ids: Vector[AccountId]): IO[Vector[Ledger.Balances]]
+  def closeAccount(id: AccountId, other: AccountId, ledger: Int, code: Int): IO[Unit]
 
   /** Lets this much time pass on the ledger's clock: a real wait, or the simulated clock moving on. */
   def passTime(d: FiniteDuration): IO[Unit]

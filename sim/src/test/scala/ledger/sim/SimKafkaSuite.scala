@@ -75,3 +75,14 @@ class SimKafkaSuite extends munit.FunSuite:
     k.poll(a, Timeout + 5)
     k.expireMembers(Timeout)
     assertEquals(k.poll(a, Timeout + 5).count(_.isInstanceOf[Delivery.Assigned]), 0)
+
+  test("a member that has not heard of a rebalance can commit what it kept, and not what moved"):
+    val k = kafka(2)
+    val a = k.join(0L)
+    k.poll(a, 0L)
+    val b = k.join(0L)
+    assertEquals(k.commit(a, Commit(Partition(1), Offset(1))), false)
+    assertEquals(k.commit(a, Commit(P0, Offset(1))), true)
+    assertEquals(k.committed(Partition(1)), None)
+    k.poll(b, 0L)
+    assertEquals(k.commit(b, Commit(Partition(1), Offset(1))), true)

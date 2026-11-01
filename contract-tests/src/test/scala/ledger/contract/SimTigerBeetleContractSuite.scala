@@ -23,6 +23,7 @@ class SimTigerBeetleContractSuite extends LedgerContract:
       atomically(Ledger.Result.Returned(tb.createTransfers(now, transfers)))
     def scan(after: Long, limit: Int): IO[Vector[LedgerTransfer]] = atomically(tb.scan(after, limit))
     def lookupAccounts(ids: Vector[AccountId]): IO[Vector[Ledger.Balances]] = atomically(tb.lookupAccounts(ids))
+    def closeAccount(id: AccountId, other: AccountId, ledger: Int, code: Int): IO[Unit] = atomically(tb.closeAccount(id))
     def elapsed: IO[FiniteDuration] = atomically(now.nanos)
     def passTime(d: FiniteDuration): IO[Unit] = atomically:
       val end = now + d.toNanos

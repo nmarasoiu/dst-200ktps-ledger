@@ -5,10 +5,10 @@ import ledger.core.*
 
 class CoverageSuite extends munit.FunSuite:
 
-  test("every mark belongs to one scenario, apart from the two no correct ledger can give"):
+  test("every mark belongs to one scenario, apart from the three no correct ledger or consumer can give"):
     val required = Scenario.values.toVector.flatMap(Coverage.required)
     assertEquals(required.size, required.distinct.size)
-    assertEquals(Mark.values.toSet -- required, Set(Mark.AuthorizationUnresolved, Mark.CaptureUnresolved))
+    assertEquals(Mark.values.toSet -- required, Set(Mark.AuthorizationUnresolved, Mark.CaptureUnresolved, Mark.ResolverRedelivered))
 
   // A correct pipeline and a caller that keeps its contracts must give an operator nothing to look at.
   test("no mark that can come with an alarm is required of faults alone"):
