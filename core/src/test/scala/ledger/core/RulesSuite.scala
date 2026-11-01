@@ -156,6 +156,12 @@ class RulesSuite extends munit.FunSuite:
   test("a post that cannot happen gives no outcome"):
     assertUnresolved(Rules.capture(PendingTransferAlreadyPosted, half), Mark.CaptureUnresolved)
 
+  test("another rejection by TigerBeetle: a closed account refuses the capture"):
+    assertDecided(Rules.capture(DebitAccountAlreadyClosed, half), CaptureRefused(CaptureRefusal.Ledger(DebitAccountAlreadyClosed)), Mark.CaptureRejected)
+
+  test("results that do not fit the command give no outcome"):
+    assertUnresolved(Rules.decide(Fixtures.authCommand(Fixtures.key(1)), fencePath = false, Vector.empty), Mark.AuthorizationUnresolved)
+
   // The transfers each command becomes.
 
   test("an authorization is a pending transfer with ID A and the stamped hold timeout"):

@@ -25,12 +25,16 @@ class AdmissionSuite extends ScalaCheckSuite:
 
   test("a partition without a leader: the authorization is refused at once; cancels and captures retry"):
     assertEquals(decide(noLeader, authorize(k)).effects, Vector(Decision.Refuse(RefusalReason.NoLeader)))
+    assertEquals(decide(noLeader, authorize(k)).marks, Vector(Mark.AdmissionRefusedNoLeader))
     assertEquals(decide(noLeader, Request.Cancel(k)).effects, Vector(Decision.Retry))
+    assertEquals(decide(noLeader, Request.Cancel(k)).marks, Vector(Mark.AdmissionRetryNoLeader))
     assertEquals(decide(noLeader, Request.Capture(k, CaptureAmount.Full)).effects, Vector(Decision.Retry))
 
   test("overloaded: the authorization is refused, the capture told to retry, the cancel accepted"):
     assertEquals(decide(busy, authorize(k)).effects, Vector(Decision.Refuse(RefusalReason.Overload)))
+    assertEquals(decide(busy, authorize(k)).marks, Vector(Mark.AdmissionRefusedOverload))
     assertEquals(decide(busy, Request.Capture(k, CaptureAmount.Full)).effects, Vector(Decision.Retry))
+    assertEquals(decide(busy, Request.Capture(k, CaptureAmount.Full)).marks, Vector(Mark.AdmissionRetryOverload))
     val cancel = decide(busy, Request.Cancel(k))
     assertEquals(cancel.effects, Vector(Decision.Admit))
     assertEquals(cancel.marks, Vector(Mark.AdmissionCancelDuringOverload))
