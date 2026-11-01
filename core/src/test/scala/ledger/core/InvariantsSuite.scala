@@ -166,6 +166,16 @@ class InvariantsSuite extends munit.FunSuite:
       .decided(120, captureCommand(k), Captured(CaptureAmount.Full))
     assertEquals(broken(h), Set(Invariants.MatchesLedger))
 
+  test(Invariants.MatchesLedger + ": a full capture beside a partial one says the hold was all moved"):
+    val whole = approved.logged(100, captureCommand(k)).ledger(posted, 110)
+      .decided(120, captureCommand(k), Captured(CaptureAmount.Full))
+      .decided(121, captureCommand(k), Captured(CaptureAmount.Partial(hold.amount.lo)))
+    assertHolds(whole)
+    val less = approved.logged(100, captureCommand(k)).ledger(posted.copy(amount = U128.of(1)), 110)
+      .decided(120, captureCommand(k), Captured(CaptureAmount.Full))
+      .decided(121, captureCommand(k), Captured(CaptureAmount.Partial(1)))
+    assertEquals(broken(less), Set(Invariants.MatchesLedger))
+
   test(Invariants.CaptureOnce + ": captured for more than it held"):
     val h = approved.ledger(Transfers.post(a, CaptureAmount.Partial(1000)), 110)
     assert(broken(h).contains(Invariants.CaptureOnce))
@@ -189,6 +199,14 @@ class InvariantsSuite extends munit.FunSuite:
 
   test("a hold within the customer's credits passes"):
     assertHolds(approved.limited(Customer).ledger(fund(100), 5))
+
+  test(Invariants.ApprovalStands):
+    def brokenKeepingContracts(h: HistoryBuilder) = Invariants.checkKeptContracts(h.history).map(_.property).toSet
+    val voided = approved.logged(30, cancelC).ledger(Transfers.void(a), 40)
+    assert(brokenKeepingContracts(voided).contains(Invariants.ApprovalStands))
+    assert(!brokenKeepingContracts(voided.sent(25, cancel)).contains(Invariants.ApprovalStands))
+    // A caller that sent a key twice can hear this about a copy of its own that timed out, and the money stays safe.
+    assert(!broken(voided).contains(Invariants.ApprovalStands))
 
   test(Invariants.WritesFollowCommands):
     assert(broken(HistoryBuilder().ledger(hold, 10)).contains(Invariants.WritesFollowCommands))

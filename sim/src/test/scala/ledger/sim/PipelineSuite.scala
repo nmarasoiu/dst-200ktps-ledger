@@ -2,9 +2,10 @@ package ledger.sim
 
 import ledger.core.*
 import ledger.sim.Coverage.Scenario
+import scala.concurrent.duration.*
 
 class PipelineSuite extends munit.FunSuite:
-  override def munitTimeout = scala.concurrent.duration.Duration(10, "min")
+  override def munitTimeout: Duration = 10.minutes
 
   test("a seed runs the pipeline to its end and holds every invariant"):
     val r = Pipeline.run(1L)
@@ -16,6 +17,17 @@ class PipelineSuite extends munit.FunSuite:
   test("a run of seeds holds every invariant, and reaches every mark of faults alone"):
     val report = Seeds.run(Scenario.Faults, 1L to 200L)(Pipeline.run(_).result)
     assert(report.passed, report.summary)
+
+  List(Scenario.ContractBreakingCaller, Scenario.MisconfiguredLedger, Scenario.PeriodSwitch).foreach: scenario =>
+    test(s"a run of seeds holds every invariant, and reaches every mark of its scenario: $scenario"):
+      val report = Seeds.run(scenario, 1L to 300L)(Pipeline.run(_, Pipeline.Config(scenario = scenario)).result)
+      assert(report.passed, report.summary.linesIterator.take(1).mkString)
+
+  // Safety must hold under any skew; only timeliness may suffer (README section 11, simulator).
+  test("clocks minutes apart break no safety invariant"):
+    (1L to 100L).foreach: seed =>
+      val history = Pipeline.run(seed, Pipeline.Config(maxSkew = 5.minutes)).history
+      assertEquals(Invariants.checkKeptContracts(history), Vector.empty, s"seed $seed")
 
   test("a seed replays exactly"):
     val (a, b) = (Pipeline.run(7L), Pipeline.run(7L))

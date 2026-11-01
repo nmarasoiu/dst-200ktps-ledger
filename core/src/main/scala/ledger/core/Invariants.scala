@@ -12,12 +12,16 @@ object Invariants:
   val MatchesLedger = "Every decision matches the ledger"
   val RefusalLeavesNoHold = "If a caller stopped resending an authorization after a refusal, no hold was ever created for its key"
   val BalancesWithinLimits = "Balances never break their configured limits"
+  val ApprovalStands = "With a caller that keeps its contracts, a hold it was told is approved is voided only after it sent a cancel for it"
   val WritesFollowCommands = "Every hold, void and post in the ledger follows a command in the log"
 
   def check(h: History): Vector[Violation] =
     noTransferAppliedTwice(h) ++ noTwoOutcomes(h) ++ cancelLeavesNoHold(h) ++ capturedAtMostOnce(h) ++
       answeredAfterLogged(h) ++ decisionsMatchLedger(h) ++ refusalLeavesNoHold(h) ++ balancesWithinLimits(h) ++
       writesFollowCommands(h)
+
+  /** `check`, and what only a caller that keeps its contracts is promised. */
+  def checkKeptContracts(h: History): Vector[Violation] = check(h) ++ approvalStands(h)
 
   /** Every outcome seen, by hold: logged by an edge or the resolver, or heard by a caller. */
   def outcomes(h: History): Vector[(TransferId, Outcome)] =
@@ -80,9 +84,11 @@ object Invariants:
       val cancel = hold.cancelDecision.toOption.flatten.toVector.flatMap:
         case CancelOutcome.CancelRefused if posts.isEmpty => broken("cancel_refused, but the hold was never posted")
         case _ => Vector.empty
-      val capture = hold.captureDecision.toOption.flatten.toVector.flatMap:
+      // Each capture reported, not only the merged one: a full capture must match the post, even beside a partial one.
+      val captures = hold.capture.toVector.collect:
         case CaptureOutcome.Captured(amount) if !posts.exists(p => moved(amount, a, h).contains(p.transfer.amount)) =>
           broken(s"captured $amount, but the ledger has no such post")
+      val capture = captures.flatten ++ hold.captureDecision.toOption.flatten.toVector.flatMap:
         case CaptureOutcome.CaptureRefused(CaptureRefusal.Cancelled) if h.ledger.voids(a).isEmpty =>
           broken("capture refused as cancelled, but the hold was never voided")
         case CaptureOutcome.CaptureRefused(CaptureRefusal.Expired | CaptureRefusal.NotApproved) if posts.nonEmpty =>
@@ -111,6 +117,15 @@ object Invariants:
       if sent.nonEmpty && answers.size == sent.size && allRefused && h.ledger.pending(a).nonEmpty then
         Vector(Violation(RefusalLeavesNoHold, s"every authorization for $key was refused, yet the ledger holds $a"))
       else Vector.empty
+
+  /** A voided authorization still returns `exists`, so a caller that resends after a non-definitive result, instead
+    * of cancelling, can hear `approved` about a hold the edge's own cancel released (README section 12, follow-up 7).
+    */
+  def approvalStands(h: History): Vector[Violation] =
+    val cancelling = h.caller.collect { case CallerRecord.Sent(_, r: Request.Cancel) => r.a }.toSet
+    val approved = h.caller.collect { case CallerRecord.Received(_, r: Request.Authorize, Reply.Decided(AuthOutcome.Approved)) => r.a }.distinct
+    approved.filter(a => !cancelling(a) && h.ledger.voids(a).nonEmpty).map: a =>
+      Violation(ApprovalStands, s"hold $a was told approved and voided, and its caller never cancelled")
 
   /** TigerBeetle's timestamps are on another clock than the log's, so this asks only that the command exists. A
     * transfer with no flags is left out: a fence looks like the setup's plain transfers, and the fence's own rules
