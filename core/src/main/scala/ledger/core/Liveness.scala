@@ -11,6 +11,7 @@ object Liveness:
   val CancelAcknowledged = "Every cancel is acknowledged"
   val HoldEnds = "Every hold ends: captured, voided, or expired by TigerBeetle within its timeout plus the expiry lag"
   val ThroughputFloor = "Under overload, useful throughput stays above a floor"
+  val RefusalsStop = "Once faults and overload have stopped, no edge refuses for overload"
 
   final case class Bounds(
       /** The edge deadline, on each edge instance's own clock. */
@@ -84,6 +85,12 @@ object Liveness:
               Vector(Violation(HoldEnds, s"hold ${hold.id} was still held at the scan, past $due"))
             case _ => Vector.empty
         case (false, Some(_), None) => Vector.empty
+
+  /** A refusal for overload that a caller heard from this time on. */
+  def refusalsStop(h: History, from: HistoryTime): Vector[Violation] =
+    h.caller.collect:
+      case CallerRecord.Received(at, request, Reply.Refused(RefusalReason.Overload)) if at >= from =>
+        Violation(RefusalsStop, s"$request was refused for overload at ${at.millis}, after $from")
 
   /** Decisions answered per window across an overload, each at least the floor. */
   def throughputFloor(h: History, from: HistoryTime, to: HistoryTime, window: FiniteDuration, floor: Int): Vector[Violation] =

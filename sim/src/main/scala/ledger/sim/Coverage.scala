@@ -33,6 +33,8 @@ object Coverage:
     case MisconfiguredLedger
     /** A period schedule with a switch inside the run (README section 4, one cluster per period). */
     case PeriodSwitch
+    /** A burst of keys past what the ledger can serve, once faults have stopped (README section 12, gap 1). */
+    case Overload
 
   import Mark.*
   import Scenario.*
@@ -47,8 +49,8 @@ object Coverage:
         CaptureCreated | CaptureReplayed | CaptureFoundExpired | CaptureExceedsHold | EdgeRefusedCommandNotAcknowledged |
         EdgeRefusedAcknowledgedTooLate | EdgeAnswered | EdgeTimedOutAuthorization | EdgeTimedOutRetry |
         EdgeOutcomeNotAcknowledged | EdgeLedgerCallFailed | EdgeLateDecisionLogged | EdgeLateResultAbandoned |
-        EdgeOwnCancelDropped | EdgeReplyAfterEnd | AdmissionRefusedOverload | AdmissionRefusedNoLeader |
-        AdmissionRetryNoLeader | AdmissionRetryOverload | AdmissionCancelDuringOverload | ResolverFencedAuthorization |
+        EdgeOwnCancelDropped | EdgeReplyAfterEnd | AdmissionRefusedNoLeader | AdmissionRetryNoLeader |
+        ResolverFencedAuthorization |
         ResolverResubmittedCancel | ResolverResubmittedCapture | ResolverJudgedIdlePartition | ResolverFoundOutcome |
         ResolverOutcomeWhileInFlight | ResolverStaleResult | ResolverRetryScheduled | ResolverRevoked |
         CallerCancelsAfterNonDefinitive | CallerResendsRefused | CallerResendsCancel |
@@ -64,6 +66,7 @@ object Coverage:
         CancelUnresolved | CaptureRejected =>
       Some(MisconfiguredLedger)
     case EdgeRefusedPeriodNotStarted | EdgePeriodEndedFencePath => Some(PeriodSwitch)
+    case AdmissionRefusedOverload | AdmissionRetryOverload | AdmissionCancelDuringOverload | AdmissionRetrySaturated => Some(Overload)
     // The first two are results no correct ledger gives. The third is a record read again within one assignment,
     // which no correct consumer does: a new assignment reads from its commit under a new generation.
     case AuthorizationUnresolved | CaptureUnresolved | ResolverRedelivered => None

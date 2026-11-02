@@ -50,7 +50,7 @@ class CoreBench:
     val command = Command.stamped(requests(n), holdTimeout)
     def at(t: Long) = Edge.Now(EdgeTime(t), WallTime(t0 + t))
     val acked = CommandLog.Written.Acknowledged
-    val s0 = Edge.step(Edge.State.Initial, at(0), Arrived(connection, requests(n)), edgeProcess)
+    val s0 = Edge.step(Edge.State.initial(edgeProcess), at(0), Arrived(connection, requests(n)), edgeProcess)
     val s1 = Edge.step(s0.state, at(10), Written(ref, Record.CommandRecord(command), acked), edgeProcess)
     val s2 = Edge.step(s1.state, at(20), Returned(ref, Ledger.Result.Returned(created)), edgeProcess)
     Edge.step(s2.state, at(30), Written(ref, Record.OutcomeRecord(command, AuthOutcome.Approved, Writer.Edge), acked), edgeProcess)

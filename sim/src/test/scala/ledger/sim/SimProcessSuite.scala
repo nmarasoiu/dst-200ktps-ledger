@@ -91,10 +91,10 @@ class SimProcessSuite extends ScalaCheckSuite:
     assertEquals(p.state.requests.size, 1)
     p.crash()
     p.restart()
-    assertEquals(p.state, Edge.State.Initial)
+    assertEquals(p.state, Edge.State.initial(cfg))
     val stale = Edge.Event.Written(Edge.Ref.Caller(Connection(1)), Record.CommandRecord(authCommand(k)), CommandLog.Written.Acknowledged)
     assertEquals(p.deliver(first, t(10), stale), Vector.empty)
-    assertEquals(p.state, Edge.State.Initial)
+    assertEquals(p.state, Edge.State.initial(cfg))
 
   test("a paused resolver wakes by its clock now: the command it read before the pause is due, and it fences it"):
     import CommandLog.Delivery

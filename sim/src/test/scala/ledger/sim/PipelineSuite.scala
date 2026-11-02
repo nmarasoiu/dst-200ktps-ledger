@@ -18,7 +18,7 @@ class PipelineSuite extends munit.FunSuite:
     val report = Seeds.run(Scenario.Faults, 1L to 200L)(Pipeline.run(_).result)
     assert(report.passed, report.summary)
 
-  List(Scenario.ContractBreakingCaller, Scenario.MisconfiguredLedger, Scenario.PeriodSwitch).foreach: scenario =>
+  List(Scenario.ContractBreakingCaller, Scenario.MisconfiguredLedger, Scenario.PeriodSwitch, Scenario.Overload).foreach: scenario =>
     test(s"a run of seeds holds every invariant, and reaches every mark of its scenario: $scenario"):
       val report = Seeds.run(scenario, 1L to 300L)(Pipeline.run(_, Pipeline.Config(scenario = scenario)).result)
       assert(report.passed, report.summary.linesIterator.take(1).mkString)
@@ -44,14 +44,34 @@ class PipelineSuite extends munit.FunSuite:
         case CallerRecord.Received(at, _, Reply.Decided(AuthOutcome.Approved)) if at >= Pipeline.Config().faults.stopAt + Pipeline.bounds.settle => at
       assert(calm.nonEmpty, s"seed $seed approved nothing once healed")
 
+  /** The bugs of admission control show only under load, the second only with a threshold set too high. */
+  private def provokedBy(bug: Planted): Pipeline.Config = bug match
+    case Planted.EdgeAdmitsEverything => Pipeline.Config(scenario = Scenario.Overload)
+    case Planted.EdgeAcceptsEveryCancel => hotStart
+    case _ => Pipeline.Config()
+
+  // An instance that starts far above what the ledger can serve, so the queue outruns the deadline before any reply
+  // says so. Nothing else makes so many cancels wait at once.
+  private val hotStart =
+    Pipeline.Config(scenario = Scenario.Overload, overload = Pipeline.Overload(floorShare = 0), maxInFlight = 200, startInFlight = 200)
+
+  test("the limit finds what the ledger can serve, however high its ceiling is"):
+    (1L to 30L).foreach: seed =>
+      val r = Pipeline.run(seed, Pipeline.Config(scenario = Scenario.Overload, maxInFlight = 5000))
+      assertEquals(r.result.violations.take(3), Vector.empty, s"seed $seed")
+
+  test("a queue that outran the deadline costs throughput for a while, but drains, and every cancel is acknowledged"):
+    (1L to 30L).foreach: seed =>
+      assertEquals(Pipeline.run(seed, hotStart).result.violations.take(3), Vector.empty, s"seed $seed")
+
   // A simulator that never fails proves nothing (README section 14).
   Planted.values.foreach: bug =>
     test(s"a planted bug is caught: $bug"):
       val failing = (1L to 200L).iterator.flatMap: seed =>
-        val found = Pipeline.run(seed, planted = Some(bug)).result.violations
+        val found = Pipeline.run(seed, provokedBy(bug), planted = Some(bug)).result.violations
         if found.isEmpty then None else Some((seed, found))
       assert(failing.hasNext, s"$bug passed 200 seeds")
       val (seed, found) = failing.next()
       assert(found.exists(_.property == bug.caughtBy), s"seed $seed broke something else: ${found.map(_.property).distinct}")
       // A failure a seed cannot show again is no use to anyone.
-      assertEquals(Pipeline.run(seed, planted = Some(bug)).result.violations, found)
+      assertEquals(Pipeline.run(seed, provokedBy(bug), planted = Some(bug)).result.violations, found)

@@ -22,6 +22,22 @@ object Pipeline:
     case LeaderOf(partition: Partition)
     case Cluster
 
+  /** A burst of keys past what the ledger can serve, once faults have stopped and settled. The seed chooses what the
+    * ledger can serve, how far past it the burst goes, and whether the ledger slows to half during the burst. Only
+    * this scenario gives the ledger a limit: it serves one transfer after another, so a call queues behind the calls
+    * before it.
+    */
+  final case class Overload(
+      transfersPerSecond: Vector[Int] = Vector(100, 200),
+      /** New keys a second during the burst, as a multiple of what the ledger can serve. */
+      load: Vector[Int] = Vector(3, 10),
+      lasting: FiniteDuration = 10.seconds,
+      /** Decisions answered in each second of the burst, at least, as a share of what the ledger can serve at its
+        * slowest. An authorization or a capture costs one transfer, so a ledger at full use answers about all of it.
+        */
+      floorShare: Double = 0.25,
+  )
+
   final case class Config(
       /** What the run does beyond faults, which every scenario has (README section 11, coverage marks). */
       scenario: Scenario = Scenario.Faults,
@@ -40,8 +56,15 @@ object Pipeline:
         * that should not have survived is still there at the end for the invariants to see.
         */
       holdTimeouts: Vector[Int] = Vector(3, 3, 3600),
+      overload: Overload = Overload(),
+      maxInFlight: Int = 64,
+      startInFlight: Int = 16,
   ):
-    def lastArrival: HistoryTime = faults.stopAt + calmArrivals
+    /** Work piled up in a phase takes up to as long as that phase to clear, so the burst waits for the faults' work. */
+    def burstStart: HistoryTime = faults.stopAt + faults.stopAt.millis.millis
+    def burstEnd: HistoryTime = burstStart + overload.lasting
+    def backlogGone: HistoryTime = burstEnd + overload.lasting
+    def lastArrival: HistoryTime = (if scenario == Scenario.Overload then backlogGone else faults.stopAt) + calmArrivals
     def endAt: HistoryTime = lastArrival + drain
 
   val Deadline: FiniteDuration = 1500.millis
@@ -88,6 +111,8 @@ object Pipeline:
     case LogArrives(append: CommandLog.Append, reply: LogReply)
     /** `noFence`: a planted bug dropped the cancel's fence, and pretends to the machine that it ran. */
     case LedgerArrives(submit: Ledger.Submit, reply: LedgerReply, noFence: Boolean = false)
+    /** A call comes to the head of a ledger with a limit. */
+    case LedgerServes(submit: Ledger.Submit, reply: LedgerReply, noFence: Boolean)
     case Pulse
     case GroupTick
     case CloseAccount(id: AccountId)
@@ -147,6 +172,18 @@ object Pipeline:
       case _ => ledgerConfig
 
     private val holdTimeoutSeconds = rng.pick(cfg.holdTimeouts)
+    private val overloaded = cfg.scenario == Scenario.Overload
+    private val servesPerSecond = if overloaded then rng.pick(cfg.overload.transfersPerSecond) else 0
+    private val burstKeysPerSecond = if overloaded then servesPerSecond * rng.pick(cfg.overload.load) else 0
+    private val slowsAt = if overloaded && rng.chance(0.5) then Some(cfg.burstStart + millis(1000, cfg.overload.lasting.toMillis - 2000)) else None
+
+    private val admission =
+      val limits = Admission.Config(cfg.maxInFlight, 300.millis, cfg.partitions, cfg.startInFlight)
+      planted match
+        case Some(Planted.EdgeAdmitsEverything) => limits.copy(maxInFlight = Int.MaxValue, startInFlight = Int.MaxValue, maxLedgerLatency = 1.day)
+        case Some(Planted.EdgeAcceptsEveryCancel) => limits.copy(cancelHeadroom = Double.PositiveInfinity)
+        case _ => limits
+
     private def edgeConfig(i: Int) = Edge.Config(
       EdgeRequest.Config(
         deadline = Deadline,
@@ -156,7 +193,7 @@ object Pipeline:
         periods = schedule,
         ledger = fencedBy(i),
       ),
-      Admission.Config(maxInFlight = 64, maxLedgerLatency = 800.millis, partitions = cfg.partitions),
+      admission,
     )
     private def resolverConfig(i: Int) =
       ResolverPartition.Config(Deadline, Grace, retryBackoff = 300.millis, schedule, fencedBy(cfg.edges + i))
@@ -184,6 +221,7 @@ object Pipeline:
     private val told = Array.fill(cfg.edges)(CommandLog.Leaders(Set.empty))
     private var ledgerUp = true
     private val ledgerWaiting = mutable.ArrayBuffer.empty[(Ledger.Submit, LedgerReply, Boolean)]
+    private var ledgerFreeAt = 0L
 
     private val callerRecords = Vector.newBuilder[CallerRecord]
     private val logRecords = Vector.newBuilder[LogRecord]
@@ -256,9 +294,15 @@ object Pipeline:
       val raised = alarms.result()
       val alarmed = raised.distinct.filterNot(allowed).map(a => Violation(AlarmProperty, a.toString))
       // A misconfigured ledger is promised safety only: a fence it cannot take leaves its commands without an end.
-      val liveness = if misconfiguration.isEmpty then Liveness.check(history, bounds) else Vector.empty
+      val quietFrom = (if overloaded then cfg.backlogGone else cfg.faults.stopAt) + bounds.settle
+      val liveness = if misconfiguration.isEmpty then Liveness.check(history, bounds) ++ Liveness.refusalsStop(history, quietFrom) else Vector.empty
       val safety = if cfg.scenario == Scenario.ContractBreakingCaller then Invariants.check(history) else Invariants.checkKeptContracts(history)
-      val violations = safety ++ liveness ++ alarmed
+      val floor =
+        if overloaded then
+          val slowest = if slowsAt.isDefined then servesPerSecond / 2 else servesPerSecond
+          Liveness.throughputFloor(history, cfg.burstStart, cfg.burstEnd, 1.second, (slowest * cfg.overload.floorShare).toInt)
+        else Vector.empty
+      val violations = safety ++ liveness ++ floor ++ alarmed
       Run(RunResult(violations, marks, trace.fingerprint), history, raised, trace.lines)
 
     private def snapshot: LedgerSnapshot =
@@ -272,7 +316,7 @@ object Pipeline:
       )
 
     private def allowed(alarm: Alarm): Boolean = cfg.scenario match
-      case Scenario.Faults | Scenario.PeriodSwitch => false
+      case Scenario.Faults | Scenario.PeriodSwitch | Scenario.Overload => false
       case Scenario.MisconfiguredLedger => true
       case Scenario.ContractBreakingCaller =>
         alarm match
@@ -283,7 +327,9 @@ object Pipeline:
       edges.indices.toVector.map(Target.EdgeInstance(_)) ++ resolvers.indices.toVector.map(Target.ResolverInstance(_)) ++
         (0 until cfg.partitions).toVector.map(i => Target.LeaderOf(Partition(i))) :+ Target.Cluster
 
-    private def nextArrival(): FiniteDuration = millis(1, 2000L / cfg.keysPerSecond)
+    private def nextArrival(): FiniteDuration =
+      val bursting = overloaded && loop.now >= cfg.burstStart && loop.now < cfg.burstEnd
+      millis(1, 2000L / (if bursting then burstKeysPerSecond else cfg.keysPerSecond))
 
     private def handle(event: Ev): Unit = event match
       case Ev.Inject(fault) => inject(fault)
@@ -301,6 +347,7 @@ object Pipeline:
         val _ = kafka.commit(member, commit)
       case Ev.LogArrives(append, reply) => logArrives(append, reply)
       case Ev.LedgerArrives(submit, reply, noFence) => ledgerArrives(submit, reply, noFence)
+      case Ev.LedgerServes(submit, reply, noFence) => ledgerServes(submit, reply, noFence)
       case Ev.Pulse =>
         if ledgerUp then ledgers.foreach(_.pulse(ledgerNow))
         loop.after(PulseEvery, Ev.Pulse)
@@ -587,9 +634,20 @@ object Pipeline:
     // call fails without statuses, and its effect is unknown.
 
     private def ledgerArrives(submit: Ledger.Submit, reply: LedgerReply, noFence: Boolean): Unit =
-      val ledger = ledgers(submit.cluster.index)
       if !ledgerUp then ledgerWaiting += ((submit, reply, noFence))
-      else if lost() then
+      else if overloaded then
+        val rate = if slowsAt.exists(loop.now >= _) then servesPerSecond / 2 else servesPerSecond
+        val taking = submit.transfers.size * 1000L / rate
+        ledgerFreeAt = ledgerFreeAt.max(loop.now.millis) + taking
+        loop.schedule(HistoryTime(ledgerFreeAt), Ev.LedgerServes(submit, reply, noFence))
+      else serve(submit, reply, noFence)
+
+    private def ledgerServes(submit: Ledger.Submit, reply: LedgerReply, noFence: Boolean): Unit =
+      if ledgerUp then serve(submit, reply, noFence) else ledgerWaiting += ((submit, reply, noFence))
+
+    private def serve(submit: Ledger.Submit, reply: LedgerReply, noFence: Boolean): Unit =
+      val ledger = ledgers(submit.cluster.index)
+      if lost() then
         if rng.chance(0.5) then
           val _ = ledger.createTransfers(ledgerNow, submit.transfers)
         ledgerReply(reply, Ledger.Result.Failed)

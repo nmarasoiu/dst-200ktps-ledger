@@ -19,7 +19,7 @@ class EdgeSuite extends ScalaCheckSuite:
 
   /** Each event at its time, from a fresh instance. The first step is the initial state. */
   private def steps(events: (Long, Event)*): Vector[Step[Edge.State, Effect]] =
-    events.foldLeft(Vector(Step[Edge.State, Effect](Edge.State.Initial))):
+    events.foldLeft(Vector(Step[Edge.State, Effect](Edge.State.initial(cfg)))):
       case (acc, (t, e)) => acc :+ Edge.step(acc.last.state, at(t), e, cfg)
 
   private def acked(ref: Ref, r: Record): Event = Event.Written(ref, r, CommandLog.Written.Acknowledged)
@@ -109,8 +109,8 @@ class EdgeSuite extends ScalaCheckSuite:
     assertEquals(ss(4).state.admission.inFlight, 1)
 
   test("the ledger's latency, from each call to its reply, feeds admission control"):
-    // Four authorizations in turn, each with a 400 ms ledger call, raise the latency past 200 ms.
-    val slow = (1 to 4).flatMap: n =>
+    // Eight authorizations in turn, each with a 400 ms ledger call, past the target of 200 ms, bring the limit to one.
+    val slow = (1 to 8).flatMap: n =>
       val (c, kn, t) = (Connection(n), key(n), n * 1000L)
       Seq(
         t -> Event.Arrived(c, authorize(kn)),
@@ -118,9 +118,13 @@ class EdgeSuite extends ScalaCheckSuite:
         (t + 401) -> returned(Ref.Caller(c), TbStatus.Created),
         (t + 402) -> acked(Ref.Caller(c), outcome(authCommand(kn), AuthOutcome.Approved)),
       )
-    val ss = steps((slow :+ (9000L -> Event.Arrived(Connection(9), authorize(key(9)))))*)
-    assertEquals(ss.flatMap(_.effects).collect { case Effect.Answer(_, r) => r }.take(4), Vector.fill(4)(Reply.Decided(AuthOutcome.Approved)))
-    assertEquals(ss.last.effects, Vector(Effect.Answer(Connection(9), Reply.Refused(RefusalReason.Overload))))
+    val next = Seq(9000L -> Event.Arrived(Connection(9), authorize(key(9))), 9001L -> Event.Arrived(Connection(10), authorize(key(10))))
+    val ss = steps((slow ++ next)*)
+    assertEquals(ss.flatMap(_.effects).collect { case Effect.Answer(_, r) => r }.take(8), Vector.fill(8)(Reply.Decided(AuthOutcome.Approved)))
+    assertEqualsDouble(ss.last.state.admission.limit, 1.0, 0.0)
+    // With nothing in flight one goes, and its reply is the news. The next one waits for that news.
+    assert(ss(ss.size - 2).effects.exists(_.isInstanceOf[Effect.Append]))
+    assertEquals(ss.last.effects, Vector(Effect.Answer(Connection(10), Reply.Refused(RefusalReason.Overload))))
 
   test("a ledger call abandoned without a reply counts at the time it waited"):
     val ss = steps(
@@ -132,6 +136,24 @@ class EdgeSuite extends ScalaCheckSuite:
     )
     assert(ss(4).marks.contains(Mark.EdgeLateResultAbandoned))
     assertEquals(ss(5).effects, Vector(Effect.Answer(Connection(2), Reply.Refused(RefusalReason.Overload))))
+
+  test("an abandoned call stays counted until it replies, since it still takes the ledger's time"):
+    val ss = steps(
+      0L -> Event.Arrived(c1, authorize(k)),
+      10L -> acked(caller, Record.CommandRecord(authCommand(k))),
+      1500L -> Event.Woke(caller),
+      3500L -> Event.Woke(caller),
+      9000L -> returned(caller, TbStatus.Created),
+    )
+    assertEquals(ss(4).state.abandoned, Set(caller))
+    assert(!ss(4).state.requests.contains(caller))
+    assertEquals(ss(5).state.abandoned, Set.empty[Ref])
+    assertEquals(ss(5).state.admission.inFlight, ss(4).state.admission.inFlight - 1)
+    assertEquals(ss(5).effects, Vector.empty)
+    assertEquals(ss(5).marks, Vector(Mark.EdgeReplyAfterEnd))
+    // It counted once as a sample, when it was abandoned.
+    assert(ss(4).state.admission.limit < ss(3).state.admission.limit)
+    assertEqualsDouble(ss(5).state.admission.limit, ss(4).state.admission.limit, 0.0)
 
   test("a reply for a request that has ended changes nothing"):
     val auth = authCommand(k)
@@ -217,9 +239,9 @@ class EdgeSuite extends ScalaCheckSuite:
           case _ => ()
     out.result()
 
-  property("admission control counts exactly the requests in flight"):
+  property("admission control counts exactly the requests in flight and the calls they abandoned"):
     forAll(actions): as =>
-      drive(as).forall((_, _, st) => st.state.admission.inFlight == st.state.requests.size)
+      drive(as).forall((_, _, st) => st.state.admission.inFlight == st.state.requests.size + st.state.abandoned.size)
 
   property("a request whose partition has no leader is answered at once, with nothing written"):
     forAll(actions): as =>
