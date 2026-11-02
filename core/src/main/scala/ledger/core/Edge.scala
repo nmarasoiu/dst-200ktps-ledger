@@ -24,11 +24,14 @@ object Edge:
   /** A request in flight. `calledAt` is when its ledger call went out, while that call has no reply. */
   final case class InFlight(request: EdgeRequest.State, calledAt: Option[EdgeTime]) derives CanEqual
 
-  /** Admission control counts every request in `requests`, until it ends. */
-  final case class State(requests: Map[Ref, InFlight], admission: Admission.State) derives CanEqual
+  /** Admission control counts every request in `requests`, until it ends, and every call in `abandoned`, until it
+    * replies: a request can stop waiting, but a call handed to the client cannot be taken back, so it still takes the
+    * ledger's time.
+    */
+  final case class State(requests: Map[Ref, InFlight], admission: Admission.State, abandoned: Set[Ref] = Set.empty) derives CanEqual
 
   object State:
-    val Initial: State = State(Map.empty, Admission.State.Initial)
+    def initial(cfg: Config): State = State(Map.empty, Admission.State.initial(cfg.admission))
 
   enum Event derives CanEqual:
     /** Caller API: a request arrived on a new connection. */
@@ -49,7 +52,7 @@ object Edge:
     case WakeAt(ref: Ref, at: EdgeTime)
     case Raise(alarm: Alarm)
 
-  def machine(cfg: Config): Machine[State, Event, Effect, Now] = Machine(State.Initial, step(_, _, _, cfg))
+  def machine(cfg: Config): Machine[State, Event, Effect, Now] = Machine(State.initial(cfg), step(_, _, _, cfg))
 
   def step(s: State, now: Now, e: Event, cfg: Config): Step[State, Effect] = e match
     case Event.Arrived(connection, request) => admit(s, Ref.Caller(connection), request, now, cfg)
@@ -70,6 +73,8 @@ object Edge:
           // The ledger's latency runs from the call to its reply.
           val sampled = r.calledAt.fold(s)(at => s.copy(admission = latency(s.admission, now.monotonic - at, cfg)))
           advance(sampled, ref, r.copy(calledAt = None), event, now, cfg)
+        case None if s.abandoned(ref) =>
+          replyAfterEnd(s.copy(admission = Admission.step(s.admission, Admission.Event.Finished, cfg.admission).state, abandoned = s.abandoned - ref))
         case None => replyAfterEnd(s)
     case Event.LeadersChanged(leaders) =>
       Step(s.copy(admission = Admission.step(s.admission, Admission.Event.LeadersChanged(leaders.leaderless), cfg.admission).state))
@@ -101,8 +106,8 @@ object Edge:
     run(s, ref, r.calledAt, EdgeRequest.step(r.request, now.monotonic, e, cfg.request), now, cfg)
 
   /** Places a request's new state, then carries out its effects. A request that ends leaves admission control's
-    * count. If its ledger call still has no reply, the time it waited counts as a latency sample, so a ledger that
-    * stops answering still raises the latency.
+    * count, unless its ledger call still has no reply. Then the call stays counted until it replies, and the time it
+    * waited counts as a latency sample, so a ledger that stops answering still lowers the limit.
     */
   private def run(
       s: State,
@@ -115,8 +120,10 @@ object Edge:
     val called = if step.effects.exists(_.isInstanceOf[EdgeRequest.Effect.Submit]) then Some(now.monotonic) else calledAt
     val placed =
       if step.state.phase == EdgeRequest.Phase.Done then
-        val sampled = called.fold(s.admission)(at => latency(s.admission, now.monotonic - at, cfg))
-        s.copy(requests = s.requests - ref, admission = Admission.step(sampled, Admission.Event.Finished, cfg.admission).state)
+        called match
+          case Some(at) =>
+            s.copy(requests = s.requests - ref, admission = latency(s.admission, now.monotonic - at, cfg), abandoned = s.abandoned + ref)
+          case None => s.copy(requests = s.requests - ref, admission = Admission.step(s.admission, Admission.Event.Finished, cfg.admission).state)
       else s.copy(requests = s.requests.updated(ref, InFlight(step.state, called)))
     step.effects.foldLeft(Step[State, Effect](placed, marks = step.marks))((acc, f) => acc.flatMap(carryOut(_, ref, f, now, cfg)))
 

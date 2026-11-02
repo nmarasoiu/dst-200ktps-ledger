@@ -39,6 +39,12 @@ enum Planted(val caughtBy: String) derives CanEqual:
   case CallerStopsCancelling extends Planted(Liveness.CancelAcknowledged)
   /** Sits on every answer for two seconds. */
   case EdgeMissesItsDeadline extends Planted(Liveness.Answered)
+  /** Refuses nothing however loaded it is, so a backlog makes every request expire (README section 12, gap 1). */
+  case EdgeAdmitsEverything extends Planted(Liveness.ThroughputFloor)
+  /** Accepts a cancel under any load. Each one that misses its deadline is resent while its call still queues, so
+    * enough of them keep the ledger busy for good, with no decision answered (README section 12, gap 1).
+    */
+  case EdgeAcceptsEveryCancel extends Planted(Liveness.CancelAcknowledged)
 
 object Planted:
   /** A copy whose answer never reaches the caller. */

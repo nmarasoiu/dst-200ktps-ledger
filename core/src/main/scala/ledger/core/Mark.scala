@@ -124,6 +124,8 @@ enum Mark derives CanEqual:
   case AdmissionRetryNoLeader
   case AdmissionRetryOverload
   case AdmissionCancelDuringOverload
+  /** Past the cancels' own thresholds, a call could not come back before the deadline. */
+  case AdmissionRetrySaturated
 
   // The resolver (README section 8, resolver).
   /** A straggling authorization gets the fence, never a submission. */

@@ -278,6 +278,11 @@ class LivenessSuite extends munit.FunSuite:
     assertEquals(broken(tooLate), Set(Liveness.HoldEnds))
     assertEquals(broken(lateButFine.copy(expiries = Some(Map.empty))), Set(Liveness.HoldEnds))
 
+  test(Liveness.RefusalsStop):
+    val h = HistoryBuilder().received(100L, auth, Reply.Refused(RefusalReason.Overload)).received(200L, auth, Reply.Refused(RefusalReason.NoLeader)).history
+    assertEquals(Liveness.refusalsStop(h, HistoryTime(150)), Vector.empty)
+    assertEquals(Liveness.refusalsStop(h, HistoryTime(50)).map(_.property), Vector(Liveness.RefusalsStop))
+
   test(Liveness.ThroughputFloor):
     val h = (0 until 10).foldLeft(HistoryBuilder())((b, i) => b.received(i * 100L, auth, Reply.Decided(Approved)))
     assertEquals(Liveness.throughputFloor(h.history, HistoryTime(0), HistoryTime(1000), 500.millis, 5), Vector.empty)
