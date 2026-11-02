@@ -589,12 +589,15 @@ abstract class LedgerContract extends CatsEffectSuite:
   test("a scan skips nothing while other calls write"):
     val writers = 4
     val perWriter = 50
+    // The flag is read before the page: only a page read after the writers finished can show nothing is left.
     def following(after: Long, seen: Vector[LedgerTransfer], done: IO[Boolean]): IO[Vector[LedgerTransfer]] =
-      ledger
-        .scan(after, 16)
-        .flatMap: page =>
-          if page.nonEmpty then following(page.last.timestamp, seen ++ page, done)
-          else done.flatMap(finished => if finished then IO.pure(seen) else ledger.passTime(1.millis) >> following(after, seen, done))
+      done.flatMap: finished =>
+        ledger
+          .scan(after, 16)
+          .flatMap: page =>
+            if page.nonEmpty then following(page.last.timestamp, seen ++ page, done)
+            else if finished then IO.pure(seen)
+            else ledger.passTime(1.millis) >> following(after, seen, done)
     for
       start <- scanAll(0, 8189).map(_.lastOption.fold(0L)(_.timestamp))
       pair <- accounts()
