@@ -1,11 +1,15 @@
 package ledger.core
 
+import scala.concurrent.duration.{Duration, FiniteDuration}
+
 /** One run's history: the one format the simulator and the stage 6 workload driver write and every invariant
   * reads (README section 11, one history for every layer). It has three sources: what each caller sent and
   * received, what the edges and the resolver wrote to the command log, and what TigerBeetle holds. The simulator
   * adds a fourth, what each edge instance saw of each request by its own clock, for the deadline property.
   *
-  * `at` times are on the history's one clock. TigerBeetle's timestamps stay in its own nanoseconds, per cluster.
+  * `at` times are on the history's one clock, with one exception in real runs: a log record's time is its append time,
+  * from a partition leader's clock, and `logClockSlack` says how far that may be from the history's. TigerBeetle's
+  * timestamps stay in its own nanoseconds, per cluster.
   */
 final case class History(
     caller: Vector[CallerRecord],
@@ -15,6 +19,8 @@ final case class History(
     /** When the simulator healed every fault, or the fault scenario ended; None if there were no faults. */
     faultsStoppedAt: Option[HistoryTime],
     endedAt: HistoryTime,
+    /** Zero in the simulator, which has one clock. */
+    logClockSlack: FiniteDuration = Duration.Zero,
 ) derives CanEqual
 
 enum CallerRecord derives CanEqual:
@@ -26,8 +32,8 @@ enum CallerRecord derives CanEqual:
   def at: HistoryTime
   def request: Request
 
-/** A command log record. `at` is when it landed, in history time, whatever its writer heard; in real runs, its append
-  * time.
+/** A command log record. `at` is when it landed, whatever its writer heard: the simulator's time, or in real runs its
+  * append time, within the history's `logClockSlack`.
   */
 final case class LogRecord(partition: Partition, offset: Offset, at: HistoryTime, record: Record) derives CanEqual
 
