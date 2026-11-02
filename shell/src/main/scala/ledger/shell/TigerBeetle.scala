@@ -21,7 +21,7 @@ import scala.util.control.NonFatal
 /** The ledger port's real adapter (README section 11, ports): one Java client per cluster, shared by the whole
   * process, so a client packs the events of every request in flight into its next request (README section 6).
   */
-final class TigerBeetle private (clients: Map[Period, Client]):
+final class TigerBeetle private (clients: Map[Period, Client]) extends LedgerCalls:
   import TigerBeetle.*
 
   /** Never fails: a call that gets no statuses has an unknown effect, whatever went wrong. */

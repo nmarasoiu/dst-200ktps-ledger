@@ -105,6 +105,16 @@ class InvariantsSuite extends munit.FunSuite:
     val h = HistoryBuilder().sent(0, auth).logged(1, authC).ledger(hold, 10).received(15, auth, Reply.Decided(Approved)).decided(20, authC, Approved)
     assertEquals(broken(h), Set(Invariants.LoggedBeforeAnswered))
 
+  test(Invariants.LoggedBeforeAnswered + ": a real history allows for the log's clock, and for no more than it states"):
+    import scala.concurrent.duration.*
+    val h = HistoryBuilder().sent(0, auth).logged(1, authC).ledger(hold, 10).received(15, auth, Reply.Decided(Approved)).decided(20, authC, Approved).history
+    def found(slack: FiniteDuration) = Invariants.answeredAfterLogged(h.copy(logClockSlack = slack)).map(_.property)
+    assertEquals(found(5.millis), Vector.empty)
+    assertEquals(found(4.millis), Vector(Invariants.LoggedBeforeAnswered))
+    // An outcome that never landed is no matter of clocks, however much is allowed.
+    val never = HistoryBuilder().sent(0, auth).logged(1, authC).ledger(hold, 10).received(15, auth, Reply.Decided(Approved)).history
+    assertEquals(Invariants.answeredAfterLogged(never.copy(logClockSlack = 1.hour)).map(_.property), Vector(Invariants.LoggedBeforeAnswered))
+
   test(Invariants.RefusalLeavesNoHold + ": a hidden resend creates the hold while the caller hears a refusal"):
     val h = HistoryBuilder().sent(0, auth).logged(1, authC).ledger(hold, 10).received(20, auth, Reply.Refused(RefusalReason.AcknowledgedTooLate))
     assert(broken(h).contains(Invariants.RefusalLeavesNoHold))

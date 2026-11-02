@@ -132,7 +132,8 @@ abstract class LogContract extends CatsEffectSuite:
       _ <- topic.member.use: m =>
         for
           _ <- pollUntil(m)(told => reads(told).size == 5)
-          _ <- topic.committed(P0).assertEquals(None)
+          // Nothing is committed past the start. An operator's seed puts a commit at the start itself.
+          _ <- topic.committed(P0).map(_.fold(0L)(_.value)).assertEquals(0L)
           _ <- m.commit(Commit(P0, Offset(3))).assertEquals(true)
           _ <- topic.committed(P0).assertEquals(Some(Offset(3)))
           end <- topic.endOffset(P0)

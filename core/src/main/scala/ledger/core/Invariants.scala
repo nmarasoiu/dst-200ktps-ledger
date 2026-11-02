@@ -66,7 +66,7 @@ object Invariants:
       .groupMap(_._1)(_._2)
     h.caller.collect:
       case CallerRecord.Received(at, request, Reply.Decided(o))
-          if !logged.getOrElse(request.id, Vector.empty).exists((d, loggedAt) => d == o.decision && loggedAt <= at) =>
+          if !logged.getOrElse(request.id, Vector.empty).exists((d, loggedAt) => d == o.decision && loggedAt <= at + h.logClockSlack) =>
         Violation(LoggedBeforeAnswered, s"${request.id} was answered ${o.decision} at $at, before that decision was logged")
 
   /** Each command's merged decision against what TigerBeetle holds. Conflicted holds are left to `noTwoOutcomes`. */

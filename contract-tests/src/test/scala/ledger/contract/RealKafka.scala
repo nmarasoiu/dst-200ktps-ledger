@@ -1,5 +1,6 @@
 package ledger.contract
 
+import cats.effect.std.Queue
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import java.net.InetAddress
@@ -8,6 +9,7 @@ import java.util.Properties
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicLong
 import ledger.core.*
+import ledger.shell.{KafkaLog, LogWriter, Provision}
 import org.apache.kafka.clients.admin.{Admin, NewTopic}
 import org.apache.kafka.clients.consumer.{CommitFailedException, ConsumerRebalanceListener, KafkaConsumer, OffsetAndMetadata}
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerRecord}
@@ -31,18 +33,11 @@ object RealKafka:
     case Classic extends Protocol("classic")
     case Consumer extends Protocol("consumer")
 
-  /** Only `A` matters to the broker, and the records of these suites are all cancels, so this is enough of a format.
-    * The producer's own timestamp is old, so a test can tell it from the append time that replaces it.
-    */
-  private def encode(record: Record): Array[Byte] =
-    val key = record.command.key
-    s"${key.createdAt.millis}|${key.body}".getBytes("UTF-8")
+  private def encode(record: Record): Array[Byte] = RecordCodec.encode(record)
 
-  private def decode(bytes: Array[Byte]): Record =
-    val text = new String(bytes, "UTF-8")
-    val (millis, body) = text.splitAt(text.indexOf('|'))
-    Record.CommandRecord(Command.Cancel(ClientKey(WallTime(millis.toLong), body.drop(1))))
+  private def decode(bytes: Array[Byte]): Record = RecordCodec.decode(bytes).fold(e => throw IllegalStateException(e), identity)
 
+  /** The producer's own timestamp is old, so a test can tell it from the append time that replaces it. */
   private val StaleProducerTimestamp = 1000L
 
   /** Shorter than the two seconds a paused broker stays in the in-sync replicas. */
@@ -50,8 +45,11 @@ object RealKafka:
 
   private val names = new AtomicLong(0)
 
-  /** Clients of one cluster. `sendTimeout` is short when a test wants sends to time out. */
-  final class Clients(bootstrap: String, protocol: Protocol, sendTimeout: FiniteDuration):
+  /** Clients of one cluster. `sendTimeout` is short when a test wants sends to time out. With `throughAdapter`, a
+    * topic's writes, metadata and members go through the shell's fs2-kafka adapter instead of the plain clients, so the
+    * same suites hold it.
+    */
+  final class Clients(bootstrap: String, protocol: Protocol, sendTimeout: FiniteDuration, throughAdapter: Boolean = false):
 
     private val admin: Admin =
       val p = new Properties
@@ -61,6 +59,7 @@ object RealKafka:
       Admin.create(p)
 
     private val producers = new ConcurrentLinkedQueue[KafkaProducer[Array[Byte], Array[Byte]]]
+    private val releases = new ConcurrentLinkedQueue[IO[Unit]]
 
     private def producer(timeout: FiniteDuration): KafkaProducer[Array[Byte], Array[Byte]] =
       val millis = timeout.toMillis.toString
@@ -77,7 +76,7 @@ object RealKafka:
       made
 
     def close: IO[Unit] =
-      IO.blocking:
+      releases.asScala.toVector.sequence_ >> IO.blocking:
         producers.forEach(_.close(JDuration.ofSeconds(1)))
         admin.close()
 
@@ -93,7 +92,11 @@ object RealKafka:
       val name = s"t${names.incrementAndGet()}"
       val topic = new NewTopic(name, partitions, replication)
         .configs(Map("message.timestamp.type" -> "LogAppendTime", "min.insync.replicas" -> minInSync.toString).asJava)
-      IO.blocking(admin.createTopics(List(topic).asJava).all.get).as(new Topic(name, partitions))
+      for
+        _ <- IO.blocking(admin.createTopics(List(topic).asJava).all.get)
+        made = new Topic(name, partitions)
+        _ <- if throughAdapter then made.useAdapter else IO.unit
+      yield made
 
     final class Topic(val name: String, val partitions: Int) extends TopicUnderTest:
       private val group = s"g-$name"
@@ -114,7 +117,29 @@ object RealKafka:
             ): Unit
           catch case _: org.apache.kafka.common.errors.TimeoutException => done(Right(CommandLog.Written.Failed))
 
-      def append(record: Record): IO[CommandLog.Written] = sendWith(patient, record)
+      private val adapterConfig = KafkaLog.Config(
+        bootstrap,
+        name,
+        group,
+        sendTimeout,
+        metadataEvery = 200.millis,
+        endCheckEvery = 50.millis,
+        groupProtocol = protocol.name,
+        consumerProperties = Map("max.poll.interval.ms" -> Member.MaxPollInterval.toMillis.toString) ++
+          (if protocol == Protocol.Classic then Map("session.timeout.ms" -> "1000", "heartbeat.interval.ms" -> "100") else Map.empty),
+      )
+      private var writer: Option[LogWriter] = None
+
+      /** As an operator would on first deployment, since the adapter's consumer stops on a missing offset. */
+      def useAdapter: IO[Unit] =
+        for
+          (made, release) <- KafkaLog.writer(adapterConfig).allocated
+          _ <- IO { writer = Some(made); releases.add(release) }
+          _ <- Provision.seedOffsets(admin, name, group)
+        yield ()
+
+      def append(record: Record): IO[CommandLog.Written] =
+        writer.fold(sendWith(patient, record))(_.append(CommandLog.Append(record)))
 
       /** A send whose timeout is shorter than a paused broker stays in the in-sync replicas. */
       def sendBriefly(record: Record): IO[CommandLog.Written] = sendWith(brief, record)
@@ -123,8 +148,10 @@ object RealKafka:
       def knowLeader: IO[Unit] = IO.blocking(brief.partitionsFor(name)).void
 
       def leaderless: IO[Set[Partition]] =
-        IO.blocking:
-          patient.partitionsFor(name).asScala.toVector.filter(_.leader == null).map(i => Partition(i.partition)).toSet
+        writer.fold(
+          IO.blocking:
+            patient.partitionsFor(name).asScala.toVector.filter(_.leader == null).map(i => Partition(i.partition)).toSet,
+        )(_.leaders.map(_.leaderless))
 
       /** A consumer with no group, read only by offset. */
       private def plainConsumer: KafkaConsumer[Array[Byte], Array[Byte]] =
@@ -161,7 +188,20 @@ object RealKafka:
           Option(offsets.get(topicPartition(partition))).map(o => Offset(o.offset))
 
       def member: Resource[IO, MemberUnderTest] =
-        Resource.make(IO.blocking(new Member))(m => IO.blocking(m.close())).widen
+        if throughAdapter then adapterMember
+        else Resource.make(IO.blocking(new Member))(m => IO.blocking(m.close())).widen
+
+      /** The adapter polls on its own, so one `poll` here is whatever it has told since the last, after as long as a
+        * plain consumer's poll takes.
+        */
+      private def adapterMember: Resource[IO, MemberUnderTest] =
+        for
+          reader <- KafkaLog.reader(adapterConfig)
+          told <- Resource.eval(Queue.unbounded[IO, CommandLog.Delivery])
+          _ <- reader.deliveries.evalMap(told.offer).compile.drain.background
+        yield new MemberUnderTest:
+          def poll: IO[Vector[CommandLog.Delivery]] = IO.sleep(100.millis) >> told.tryTakeN(None).map(_.toVector)
+          def commit(commit: CommandLog.Commit): IO[Boolean] = reader.commit(commit)
 
       private final class Member extends MemberUnderTest:
         private val consumer: KafkaConsumer[Array[Byte], Array[Byte]] =
@@ -236,18 +276,22 @@ object RealKafka:
     "KAFKA_HEAP_OPTS" -> "-Xmx400m -Xms400m",
   )
 
-  def singleBroker(protocol: Protocol): Resource[IO, LogUnderTest] =
-    val broker = Resource.make(
-      IO.blocking:
-        val c = new org.testcontainers.kafka.KafkaContainer(Image)
-        c.withEnv(fastGroups.asJava)
-        c.start()
-        c,
-    )(c => IO.blocking(c.stop()))
+  /** One running broker's address. It keeps committed offsets as long as the design needs (README section 4). */
+  def broker: Resource[IO, String] =
+    Resource
+      .make(
+        IO.blocking:
+          val c = new org.testcontainers.kafka.KafkaContainer(Image)
+          c.withEnv(fastGroups.asJava)
+          c.withEnv("KAFKA_OFFSETS_RETENTION_MINUTES", (30 * 24 * 60).toString)
+          c.start()
+          c,
+      )(c => IO.blocking(c.stop()))
+      .map(c => address(c.getHost, c.getMappedPort(9092)))
+
+  def singleBroker(protocol: Protocol, throughAdapter: Boolean = false): Resource[IO, LogUnderTest] =
     broker
-      .flatMap: c =>
-        val bootstrap = address(c.getHost, c.getMappedPort(9092))
-        Resource.make(IO(new Clients(bootstrap, protocol, 10.seconds)))(_.close)
+      .flatMap(bootstrap => Resource.make(IO(new Clients(bootstrap, protocol, 10.seconds, throughAdapter)))(_.close))
       .map: clients =>
         new LogUnderTest:
           def topic(partitions: Int): IO[TopicUnderTest] = clients.newTopic(partitions).map(t => t: TopicUnderTest)
@@ -267,7 +311,7 @@ object RealKafka:
     "KAFKA_DEFAULT_REPLICATION_FACTOR" -> "3",
   )
 
-  def threeBrokers: Resource[IO, FaultyLogUnderTest] =
+  def threeBrokers(throughAdapter: Boolean = false): Resource[IO, FaultyLogUnderTest] =
     val brokers = Resource.make(
       IO.blocking:
         val network = Network.newNetwork()
@@ -287,7 +331,7 @@ object RealKafka:
     }
     brokers.flatMap: (all, _) =>
       val bootstrap = all.values.toVector.map(c => address(c.getHost, c.getMappedPort(9092))).mkString(",")
-      Resource.make(IO(new Clients(bootstrap, Protocol.Consumer, 5.seconds)))(_.close).map(new Cluster(all, _))
+      Resource.make(IO(new Clients(bootstrap, Protocol.Consumer, 5.seconds, throughAdapter)))(_.close).map(new Cluster(all, _))
 
   private type Broker = org.testcontainers.kafka.KafkaContainer
 
