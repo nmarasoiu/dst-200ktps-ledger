@@ -277,17 +277,28 @@ object RealKafka:
   )
 
   /** One running broker's address. It keeps committed offsets as long as the design needs (README section 4). */
-  def broker: Resource[IO, String] =
-    Resource
-      .make(
-        IO.blocking:
-          val c = new org.testcontainers.kafka.KafkaContainer(Image)
-          c.withEnv(fastGroups.asJava)
-          c.withEnv("KAFKA_OFFSETS_RETENTION_MINUTES", (30 * 24 * 60).toString)
-          c.start()
-          c,
-      )(c => IO.blocking(c.stop()))
-      .map(c => address(c.getHost, c.getMappedPort(9092)))
+  private def container: Resource[IO, Broker] =
+    Resource.make(
+      IO.blocking:
+        val c = new org.testcontainers.kafka.KafkaContainer(Image)
+        c.withEnv(fastGroups.asJava)
+        c.withEnv("KAFKA_OFFSETS_RETENTION_MINUTES", (30 * 24 * 60).toString)
+        c.start()
+        c,
+    )(c => IO.blocking(c.stop()))
+
+  def broker: Resource[IO, String] = container.map(c => address(c.getHost, c.getMappedPort(9092)))
+
+  /** One broker that a test can make stop answering, with its connections left open. */
+  final case class PausableBroker(bootstrap: String, pause: IO[Unit], resume: IO[Unit])
+
+  def pausableBroker: Resource[IO, PausableBroker] =
+    container.map: c =>
+      PausableBroker(
+        address(c.getHost, c.getMappedPort(9092)),
+        IO.blocking(c.getDockerClient.pauseContainerCmd(c.getContainerId).exec()).void,
+        IO.blocking(c.getDockerClient.unpauseContainerCmd(c.getContainerId).exec()).void,
+      )
 
   def singleBroker(protocol: Protocol, throughAdapter: Boolean = false): Resource[IO, LogUnderTest] =
     broker
