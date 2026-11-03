@@ -8,6 +8,10 @@ ThisBuild / scalacOptions ++= Seq(
   "-deprecation", "-feature", "-unchecked", "-Wunused:all", "-Werror", "-language:strictEquality",
 )
 
+// One module's tests at a time, for the reason the contract suites run one at a time: the simulator's seeds would keep
+// a small machine busy while those suites time things.
+Global / concurrentRestrictions += Tags.limit(Tags.Test, 1)
+
 lazy val root = (project in file("."))
   .aggregate(core, sim, shell, contractTests, bench)
   .settings(publish / skip := true)
