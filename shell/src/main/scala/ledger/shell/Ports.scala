@@ -19,7 +19,7 @@ trait LogWriter:
 trait LogReader:
   /** What the consumer tells the resolver, for as long as the stream runs. It fails rather than skip a command: on an
     * offset that is missing or has aged out of the log (README section 4, command log rules), or on a record it cannot
-    * read.
+    * read. A broker that is away is not a failure: the stream waits for it.
     */
   def deliveries: Stream[IO, CommandLog.Delivery]
 

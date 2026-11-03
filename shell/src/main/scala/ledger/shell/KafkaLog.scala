@@ -8,6 +8,7 @@ import ledger.core.*
 import ledger.core.CommandLog.{Delivery, Written}
 import org.apache.kafka.clients.consumer.OffsetAndMetadata
 import org.apache.kafka.common.TopicPartition
+import org.apache.kafka.common.errors.RetriableException
 import scala.concurrent.duration.*
 import scala.util.control.NonFatal
 
@@ -80,7 +81,7 @@ object KafkaLog:
     /** A partition's stream ends when the partition is revoked. */
     private def ofPartition(tp: TopicPartition, records: Stream[IO, Rec]): Stream[IO, Delivery] =
       val p = Partition(tp.partition)
-      Stream.eval(consumer.committed(Set(tp))).flatMap: committed =>
+      Stream.eval(untilAnswered(consumer.committed(Set(tp)))).flatMap: committed =>
         val from = committed.get(tp).fold(0L)(_.offset)
         Stream.eval(Ref[IO].of(from)).flatMap: next =>
           val read = records.evalMap: r =>
@@ -96,9 +97,16 @@ object KafkaLog:
           // A record read and not yet told still counts as not at the end, since `next` moves only as it is told.
           val ends = Stream
             .awakeEvery[IO](cfg.endCheckEvery)
-            .evalMap(_ => (consumer.endOffsets(Set(tp)), next.get).mapN((ends, n) => Option.when(ends.get(tp).exists(n >= _))(Delivery.ReachedEnd(p))))
+            .evalMap: _ =>
+              (consumer.endOffsets(Set(tp)), next.get)
+                .mapN((ends, n) => Option.when(ends.get(tp).exists(n >= _))(Delivery.ReachedEnd(p)))
+                .recover { case _: RetriableException => None }
             .unNone
           Stream.emit(Delivery.Assigned(p, Offset(from))) ++ read.mergeHaltL(ends) ++ Stream.emit(Delivery.Revoked(p))
+
+    /** A broker that is away, for however long, is no reason to stop: it only means no news yet. Any other error is. */
+    private def untilAnswered[A](call: IO[A]): IO[A] =
+      call.recoverWith { case _: RetriableException => IO.sleep(cfg.endCheckEvery) >> untilAnswered(call) }
 
     def commit(commit: CommandLog.Commit): IO[Boolean] =
       consumer
