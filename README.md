@@ -396,7 +396,7 @@ Testing is the centerpiece of the project: every invariant is checked by determi
 - With a caller that keeps its contracts, a hold it was told is approved is voided only after it sent a cancel for it.
 - Every hold, void and post in the ledger follows a command in the log: an authorization, a cancel or a capture of that hold. Only the pipeline writes, and it writes only what it logged first (section 2).
 
-**Liveness and timeliness, checked once faults stop.** The simulator heals every fault and keeps running; the real-binary layers check after the fault scenario ends:
+**Liveness and timeliness, checked once faults stop.** The simulator heals every fault and keeps running; the real-binary layers check after the fault scenario ends. Faults leave callers resending, and how long those resends take to clear depends on the machine, so real runs judge answers on time only after they have cleared:
 
 - Every request that reaches a live edge instance gets an answer within the 1.5 s edge deadline, by that instance's clock.
 - Every command in the log gets an outcome in the log, and every cancel is acknowledged.

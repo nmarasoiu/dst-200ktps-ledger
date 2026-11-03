@@ -48,6 +48,7 @@ class EndToEndSuite extends CatsEffectSuite:
 
   private def assertClean(run: Run, h: History): Unit =
     val found = judged(h)
+    if found.nonEmpty then run.keep(found, h)
     assert(found.isEmpty, s"${found.size} violations, first: ${found.take(5).mkString("\n")}\nProcess logs: ${run.logs}")
 
   test("nothing goes wrong, so the resolver has nothing to do, and every answer matches the ledger"):
@@ -76,8 +77,12 @@ class EndToEndSuite extends CatsEffectSuite:
       _ <- (Vector(edges(0), resolvers(0), edges(1), resolvers(1), edges(0), resolvers(1))).traverse_ : victim =>
         IO.sleep(3.seconds) >> victim.killAndRestart
       _ <- r.ready(2)
-      stopped <- r.now
+      // How long the resends the kills left take to clear depends on the machine, so only what comes after them is
+      // judged on time: the same load again, once every caller has finished.
       _ <- loading.joinWithUnit
+      stopped <- r.now
+      _ <- IO.sleep(Bounds.settle)
+      _ <- r.load(keys = 300, pause = 10.millis, firstKey = 3000)
       _ <- IO.sleep(Bounds.outcomeWithin + 1.second)
       h <- r.history(Some(stopped))
       _ <- (edges ++ resolvers).traverse_(_.kill)
@@ -316,6 +321,10 @@ object EndToEndSuite:
 
     def close: IO[Unit] = launched.asScala.toVector.traverse_(_.kill)
 
+    /** Beside the processes' logs, which CI keeps from a failed run. */
+    def keep(found: Vector[Violation], h: History): Unit =
+      Files.writeString(logDir.resolve("history.txt"), (found ++ h.caller).mkString("\n")): Unit
+
     /** The topic, the fence accounts, the group's offsets, this test's accounts, and a cursor past what came before. */
     def prepare: IO[Unit] = Shell.provision(settings) >> accounts
 
@@ -410,10 +419,10 @@ object EndToEndSuite:
       yield ()
 
     /** Keys arriving `pause` apart, each living out its life on its own. */
-    def load(keys: Int, pause: FiniteDuration): IO[Unit] =
-      Random.scalaUtilRandomSeedInt[IO](n).flatMap: rng =>
+    def load(keys: Int, pause: FiniteDuration, firstKey: Int = 0): IO[Unit] =
+      Random.scalaUtilRandomSeedInt[IO](n + firstKey).flatMap: rng =>
         (0 until keys).toVector.parTraverse_ : i =>
-          IO.sleep(pause * i.toLong) >> life(i, rng, sendOverHttp(rng), r => IO { recorded.add(r); () })
+          IO.sleep(pause * i.toLong) >> life(firstKey + i, rng, sendOverHttp(rng), r => IO { recorded.add(r); () })
 
     /** One key whose edge dies at `point`, serving the command of this `kind`. The rest of its life goes through a healthy
       * edge, as a caller's retry would through the load balancer.

@@ -19,3 +19,10 @@ jobs:
       - uses: coursier/cache-action@v6
       # GitHub sets CI, so a contract suite that cannot reach Docker fails here instead of going unrun.
       - run: sbt -batch testFull
+      # The processes' logs and the history of a failed end-to-end run, which go with the runner otherwise.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: end-to-end-logs
+          path: /tmp/e2e-*
+          if-no-files-found: ignore
