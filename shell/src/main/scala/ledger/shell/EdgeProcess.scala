@@ -28,6 +28,7 @@ object EdgeProcess:
     for
       supervisor <- Supervisor[IO]
       events <- Resource.eval(Queue.bounded[IO, Edge.Event](MachineLoop.EventCapacity))
+      wakes <- Resource.eval(Wakes(IO.monotonic.map(_.toMillis), events))
       waiting <- Resource.eval(Ref[IO].of(Map.empty[Connection, Deferred[IO, Reply]]))
       connections <- Resource.eval(Ref[IO].of(0L))
       now = (IO.monotonic, IO.realTime).mapN2((m, w) => Edge.Now(EdgeTime(m.toMillis), WallTime(w.toMillis)))
@@ -39,11 +40,10 @@ object EdgeProcess:
             supervisor.supervise(log.append(append).flatMap(written => events.offer(Edge.Event.Written(ref, append.record, written)))).void
           case Edge.Effect.Submit(ref, submit) =>
             supervisor.supervise(ledger.submit(submit).flatMap(result => events.offer(Edge.Event.Returned(ref, result)))).void
-          case Edge.Effect.WakeAt(ref, at) =>
-            val wake = IO.monotonic.flatMap(m => IO.sleep((at.millis - m.toMillis).max(0L).millis)) >> events.offer(Edge.Event.Woke(ref))
-            supervisor.supervise(wake).void
+          case Edge.Effect.WakeAt(ref, at) => wakes.at(at.millis, Edge.Event.Woke(ref))
           case Edge.Effect.Raise(raised) => alarm(raised)
       _ <- MachineLoop.run(Edge.machine(cfg), now, events, perform).background
+      _ <- wakes.run.background
       _ <- followLeaders(log, events, leadersEvery).background
     yield new EdgeProcess:
       def ask(request: Request): IO[Reply] =
