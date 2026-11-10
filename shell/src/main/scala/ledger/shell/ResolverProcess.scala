@@ -30,6 +30,7 @@ object ResolverProcess:
     Supervisor[IO].use: supervisor =>
       for
         events <- Queue.bounded[IO, Resolver.Event](MachineLoop.EventCapacity)
+        wakes <- Wakes(IO.realTime.map(_.toMillis), events)
         pending <- Ref[IO].of(Map.empty[Partition, Offset])
         now = IO.realTime.map(t => ResolverTime(t.toMillis))
         perform = (f: Resolver.Effect) =>
@@ -39,9 +40,7 @@ object ResolverProcess:
             case Resolver.Effect.Append(ref, append) =>
               supervisor.supervise(log.append(append).flatMap(written => events.offer(Resolver.Event.Written(ref, written)))).void
             case Resolver.Effect.Commit(commit) => pending.update(_.updated(commit.partition, commit.next))
-            case Resolver.Effect.WakeAt(at) =>
-              val wake = IO.realTime.flatMap(t => IO.sleep((at.millis - t.toMillis).max(0L).millis)) >> events.offer(Resolver.Event.TimeAdvanced)
-              supervisor.supervise(wake).void
+            case Resolver.Effect.WakeAt(at) => wakes.at(at.millis, Resolver.Event.TimeAdvanced)
             case Resolver.Effect.Raise(raised) => alarm(raised)
         steps = MachineLoop.run(Resolver.machine(cfg), now, events, perform)
         reading = reader.deliveries
@@ -52,7 +51,7 @@ object ResolverProcess:
           .compile
           .drain
         committing = (IO.sleep(commitEvery) >> commitAll(reader, pending)).foreverM
-        _ <- (steps, reading, committing).parTupled
+        _ <- (steps, reading, committing, wakes.run).parTupled
       yield ()
 
   private def commitAll(reader: LogReader, pending: Ref[IO, Map[Partition, Offset]]): IO[Unit] =
