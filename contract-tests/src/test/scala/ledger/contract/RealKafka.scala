@@ -61,11 +61,12 @@ object RealKafka:
     private val producers = new ConcurrentLinkedQueue[KafkaProducer[Array[Byte], Array[Byte]]]
     private val releases = new ConcurrentLinkedQueue[IO[Unit]]
 
-    private def producer(timeout: FiniteDuration): KafkaProducer[Array[Byte], Array[Byte]] =
+    private def producer(timeout: FiniteDuration, idempotent: Boolean = true): KafkaProducer[Array[Byte], Array[Byte]] =
       val millis = timeout.toMillis.toString
       val p = new Properties
       p.put("bootstrap.servers", bootstrap)
       p.put("acks", "all")
+      p.put("enable.idempotence", idempotent.toString)
       p.put("linger.ms", "0")
       p.put("delivery.timeout.ms", millis)
       p.put("request.timeout.ms", millis)
@@ -102,7 +103,14 @@ object RealKafka:
       private val group = s"g-$name"
 
       private val patient = producer(sendTimeout)
-      private val brief = producer(BriefSend)
+
+      /** Not idempotent. An idempotent producer sends nothing until it holds a producer ID, which a new one asks of
+        * whichever broker it reaches first (`Sender.runOnce`, `RecordAccumulator.shouldStopDrainBatchesForPartition`).
+        * A test pauses a broker moments after this producer is made, so that request may still wait on the paused
+        * broker, and the send would time out without leaving. Whether a timed-out write lands is up to the leader, so
+        * the design's idempotent producer sees the same.
+        */
+      private val brief = producer(BriefSend, idempotent = false)
 
       private def topicPartition(p: Partition) = new TopicPartition(name, p.index)
 
