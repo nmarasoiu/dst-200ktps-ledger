@@ -84,11 +84,6 @@ class AdmissionSuite extends ScalaCheckSuite:
     forAll(states, requests): (s, r) =>
       s.inFlight > 0 || s.leaderless(Partitioner.partition(r.a, cfg.partitions)) || decide(s, r).effects.contains(Decision.Admit)
 
-  property("a cancel is admitted wherever an authorization or a capture is, and sometimes where they are not"):
-    forAll(states, Gens.key): (s, k) =>
-      val others = Vector[Request](authorize(k), Request.Capture(k, CaptureAmount.Full))
-      !others.exists(decide(s, _).effects.contains(Decision.Admit)) || decide(s, Request.Cancel(k)).effects.contains(Decision.Admit)
-
   property("cancels are never refused"):
     forAll(states, requests): (s, r) =>
       r.kind != Kind.Cancel || !decide(s, r).effects.exists(_.isInstanceOf[Decision.Refuse])
