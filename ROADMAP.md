@@ -36,6 +36,7 @@ Prove the protocols, not just test them.
 - A Jepsen-style checker for balance reads. Stage 6 already checks what the workload driver was told about its own requests; this checks that every balance a caller reads is explained by some order of the transfers the ledger applied. It needs the pipeline to serve reads, from TigerBeetle or from the Postgres audit log of phase E. Jepsen's Elle is the reference.
 - The same model extended to the cross-shard protocol of phase B.
 - Optional: a proven Lean model of the pure core beside the Scala core, tested against it on stage 3's seeds, as [Cedar](https://arxiv.org/abs/2407.01688) does with Rust. The Scala core stays what runs (README section 10). Phase C is done without it.
+- Optional: a Rust twin of the pure core and the simulator, held to the Scala ones by the same fixed vectors and by the same trace for the same seed. The core is ported with every core suite (README section 10); the simulator is next. The simulator's generator is SplitMix64, and its one floating-point step is exact (*verified* in `Rng`), so a seed can mean the same plan in either language. Phase C is done without it.
 
 **Depends on** stages 3 and 4: the planted bugs come from the simulator, and a proof about Kafka or TigerBeetle holds only as far as the contract tests back its model of them. **Done when** the model checker finds the planted bugs of stage 3 and passes the real design.
 

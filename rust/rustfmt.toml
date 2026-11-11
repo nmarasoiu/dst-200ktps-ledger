@@ -1,0 +1,3 @@
+# Lines as long as the Scala code's.
+max_width = 140
+use_small_heuristics = "Max"
