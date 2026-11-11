@@ -1,0 +1,6 @@
+# Pinned like the JDK in .sdkmanrc. The bare-metal target has no standard library, so building the core for it
+# proves the core reaches no clock, file, thread, socket or randomly seeded map, even through a dependency.
+[toolchain]
+channel = "1.95.0"
+components = ["clippy", "rustfmt"]
+targets = ["thumbv7em-none-eabi"]

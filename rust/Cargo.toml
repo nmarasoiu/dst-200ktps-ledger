@@ -1,0 +1,15 @@
+# The Rust twin of the Scala core (README section 10). One crate for now; the simulator joins it next.
+[workspace]
+members = ["core"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+# Money is u128: an overflow must stop the program, in release builds too.
+[profile.release]
+overflow-checks = true

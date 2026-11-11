@@ -26,3 +26,24 @@ jobs:
           name: end-to-end-logs
           path: /tmp/e2e-*
           if-no-files-found: ignore
+
+  # The Rust twin of the core (README section 10).
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      # With no argument, rustup installs what rust/rust-toolchain.toml pins, the bare-metal target included.
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - run: cargo fmt --check
+      # Warnings fail the build, as -Werror does for the Scala.
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+      # A target with no standard library: the core builds only if it reaches no clock, file, thread or socket.
+      - run: cargo build -p ledger-core --target thumbv7em-none-eabi --locked
