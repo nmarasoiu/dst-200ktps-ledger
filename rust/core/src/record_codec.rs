@@ -19,7 +19,7 @@ use crate::tb::TbStatus;
 
 const VERSION: u8 = 1;
 
-/// Panics on a client key whose body is longer than `writeUTF` allows, 65535 bytes, as the Scala throws.
+/// `ClientKey` holds every body within `writeUTF`'s limit, so this never panics.
 pub fn encode(record: &Record) -> Vec<u8> {
     let mut out = Vec::with_capacity(96);
     out.push(VERSION);
@@ -66,6 +66,18 @@ fn unknown(what: &str, tag: i8) -> String {
 
 fn write_u128(out: &mut Vec<u8>, n: u128) {
     out.extend_from_slice(&n.to_be_bytes());
+}
+
+/// The bytes `writeUTF` takes for a string, its 2-byte length aside: one per UTF-16 unit from 1 to 127, two for 0 and
+/// up to 2047, three for the rest.
+pub(crate) fn utf_length(s: &str) -> usize {
+    s.encode_utf16()
+        .map(|unit| match unit {
+            0x0001..=0x007f => 1,
+            0x0000 | 0x0080..=0x07ff => 2,
+            _ => 3,
+        })
+        .sum()
 }
 
 fn write_utf(out: &mut Vec<u8>, s: &str) {

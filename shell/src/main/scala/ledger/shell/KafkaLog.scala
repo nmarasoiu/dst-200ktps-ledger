@@ -51,8 +51,11 @@ object KafkaLog:
     KafkaProducer.resource(settings).map: producer =>
       new LogWriter:
         def append(append: CommandLog.Append): IO[Written] =
-          val record = ProducerRecord(cfg.topic, Partitioner.recordKey(append.record.command.a), RecordCodec.encode(append.record))
-          producer.produce(ProducerRecords.one(record)).flatten.as(Written.Acknowledged).recover { case NonFatal(_) => Written.Failed }
+          // Built inside the IO, so a record that cannot be written fails its own append, never the machine's loop.
+          IO(ProducerRecord(cfg.topic, Partitioner.recordKey(append.record.command.a), RecordCodec.encode(append.record)))
+            .flatMap(record => producer.produce(ProducerRecords.one(record)).flatten)
+            .as(Written.Acknowledged)
+            .recover { case NonFatal(_) => Written.Failed }
 
         def leaders: IO[CommandLog.Leaders] =
           producer.partitionsFor(cfg.topic).map: partitions =>

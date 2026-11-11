@@ -8,6 +8,7 @@ use core::fmt;
 use sha2::{Digest, Sha256};
 
 use crate::machine::WallTime;
+use crate::record_codec;
 
 /// A TigerBeetle transfer ID.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -56,16 +57,24 @@ impl ClientKey {
     pub const MIN_TIME: i64 = 1;
     pub const MAX_TIME: i64 = (1 << 48) - 2;
 
+    /// The most bytes a key's body may take as the command log writes it: Java's modified UTF-8 (`record_codec`).
+    pub const MAX_BODY_BYTES: usize = 65_535;
+
+    /// A body must be one the command log can write. It is Unicode text by its type: a Rust string cannot hold the lone
+    /// surrogate that the Scala core refuses, since UTF-8 would turn it into `?` and two keys would share an ID.
     pub fn try_new(created_at: WallTime, body: impl Into<String>) -> Result<ClientKey, String> {
         let t = created_at.millis();
+        let body = body.into();
         if !(Self::MIN_TIME..=Self::MAX_TIME).contains(&t) {
             Err(format!("creation time {t} is outside [{}, {}]", Self::MIN_TIME, Self::MAX_TIME))
+        } else if record_codec::utf_length(&body) > Self::MAX_BODY_BYTES {
+            Err(format!("the key takes more than {} bytes", Self::MAX_BODY_BYTES))
         } else {
-            Ok(ClientKey { created_at, body: body.into() })
+            Ok(ClientKey { created_at, body })
         }
     }
 
-    /// Panics on a time outside the range, as the Scala `apply` throws.
+    /// Panics on a key `try_new` refuses, as the Scala `apply` throws.
     pub fn new(created_at: WallTime, body: impl Into<String>) -> ClientKey {
         match Self::try_new(created_at, body) {
             Ok(key) => key,

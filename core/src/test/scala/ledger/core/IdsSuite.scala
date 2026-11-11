@@ -32,6 +32,25 @@ class IdsSuite extends ScalaCheckSuite:
     assert(ClientKey.from(WallTime(ClientKey.MinTime), "k").isRight)
     assert(ClientKey.from(WallTime(ClientKey.MaxTime), "k").isRight)
 
+  test("a key's body must be Unicode text, since UTF-8 turns a lone surrogate into the same bytes as '?'"):
+    val t = WallTime(1_700_000_000_000L)
+    assert("x\ud800".getBytes("UTF-8").sameElements("x?".getBytes("UTF-8")))
+    assert(ClientKey.from(t, "x\ud800").isLeft)
+    assert(ClientKey.from(t, "\udc00x").isLeft)
+    assert(ClientKey.from(t, "x\ud800\ud800").isLeft)
+    assert(ClientKey.from(t, "x😀").isRight)
+
+  test("a key's body must fit what the command log can write for it"):
+    val t = WallTime(1_700_000_000_000L)
+    val longest = ClientKey.from(t, "x" * ClientKey.MaxBodyBytes)
+    assert(longest.isRight)
+    assert(longest.map(k => RecordCodec.encode(Record.CommandRecord(Command.Cancel(k)))).isRight)
+    assert(ClientKey.from(t, "x" * (ClientKey.MaxBodyBytes + 1)).isLeft)
+    // NUL takes two bytes and every other character here three, as `writeUTF` writes them.
+    assert(ClientKey.from(t, "\u0000" * (ClientKey.MaxBodyBytes / 2 + 1)).isLeft)
+    assert(ClientKey.from(t, "€" * (ClientKey.MaxBodyBytes / 3 + 1)).isLeft)
+    assert(ClientKey.from(t, "€" * (ClientKey.MaxBodyBytes / 3)).isRight)
+
   property("A takes the key's time in its high 48 bits; V and P take A's time"):
     forAll(Gens.key): k =>
       val a = Ids.authorization(k)

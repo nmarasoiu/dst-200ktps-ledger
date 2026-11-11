@@ -57,6 +57,12 @@ object RecordCodec:
     out.writeLong(key.createdAt.millis)
     out.writeUTF(key.body)
 
+  /** The bytes `writeUTF` takes for a string, its 2-byte length aside: one per character from 1 to 127, two for 0 and
+    * up to 2047, three for the rest. `ClientKey` holds every body within `writeUTF`'s limit, so `encode` never throws.
+    */
+  private[core] def utfLength(s: String): Int =
+    s.foldLeft(0)((n, c) => n + (if c >= '\u0001' && c <= '\u007f' then 1 else if c <= '߿' then 2 else 3))
+
   private def readKey(in: DataInputStream): ClientKey =
     val createdAt = WallTime(in.readLong())
     ClientKey.from(createdAt, in.readUTF()).fold(e => throw IOException(e), identity)
