@@ -38,10 +38,17 @@ abstract class LogContract extends CatsEffectSuite:
       else member.poll.flatMap(more => log.passTime(50.millis) >> go(told ++ more, left - 1))
     go(Vector.empty, 400)
 
+  /** What a member holds after hearing `told`, from when it joined. A partition is assigned only while not held and
+    * revoked only while held: a revocation told late would make the resolver drop a partition it was just given.
+    */
   private def assignedTo(told: Vector[Delivery]): Set[Partition] =
     told.foldLeft(Set.empty[Partition]):
-      case (owned, Delivery.Assigned(p, _)) => owned + p
-      case (owned, Delivery.Revoked(p)) => owned - p
+      case (owned, d @ Delivery.Assigned(p, _)) =>
+        assert(!owned.contains(p), s"$d while held, in $told")
+        owned + p
+      case (owned, d @ Delivery.Revoked(p)) =>
+        assert(owned.contains(p), s"$d while not held, in $told")
+        owned - p
       case (owned, _) => owned
 
   private def reads(told: Vector[Delivery]): Vector[Delivery.Read] = told.collect { case r: Delivery.Read => r }
