@@ -26,10 +26,32 @@ object ClientKey:
   val MinTime: Long = 1L
   val MaxTime: Long = (1L << 48) - 2
 
+  /** The most bytes a key's body may take as the command log writes it: Java's modified UTF-8 (`RecordCodec`). */
+  val MaxBodyBytes: Int = 65535
+
+  /** A body must be Unicode text: the hash writes it as UTF-8, which turns a lone surrogate into `?`, so two keys
+    * would share an ID. And the command log must be able to write it.
+    */
   def from(createdAt: WallTime, body: String): Either[String, ClientKey] =
     val t = createdAt.millis
     if t < MinTime || t > MaxTime then Left(s"creation time $t is outside [$MinTime, $MaxTime]")
+    else if !wellFormed(body) then Left("the key holds a lone surrogate, which is not Unicode text")
+    else if RecordCodec.utfLength(body) > MaxBodyBytes then Left(s"the key takes more than $MaxBodyBytes bytes")
     else Right(new ClientKey(createdAt, body))
+
+  /** Every surrogate is half of a pair. */
+  private def wellFormed(s: String): Boolean =
+    var i = 0
+    var ok = true
+    while ok && i < s.length do
+      val c = s.charAt(i)
+      if Character.isHighSurrogate(c) then
+        ok = i + 1 < s.length && Character.isLowSurrogate(s.charAt(i + 1))
+        i += 2
+      else
+        ok = !Character.isLowSurrogate(c)
+        i += 1
+    ok
 
   def apply(createdAt: WallTime, body: String): ClientKey =
     from(createdAt, body).fold(e => throw IllegalArgumentException(e), identity)

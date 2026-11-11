@@ -2,12 +2,12 @@ package ledger.shell
 
 import cats.effect.IO
 import io.circe.Json
-import io.circe.jawn.parse
 import ledger.core.*
 import cats.syntax.all.*
 import munit.CatsEffectSuite
 import org.http4s.circe.*
-import org.http4s.{Method, Request as HttpRequest, Status}
+import org.http4s.headers.`Content-Type`
+import org.http4s.{MediaType, Method, Request as HttpRequest, Status}
 import org.scalacheck.Gen
 import org.scalacheck.Prop.forAll
 
@@ -47,9 +47,13 @@ class EdgeApiSuite extends CatsEffectSuite with munit.ScalaCheckSuite:
   private def answering(reply: Reply): org.http4s.HttpApp[IO] =
     EdgeApi.routes((_: Request) => IO.pure(reply)).orNotFound
 
+  /** The body as a caller writes it. Parsing it here and printing it again would turn an escaped lone surrogate into
+    * `?` on the way out, as UTF-8 does, so the edge would never see it.
+    */
   private def post(path: String, body: String) =
-    val parsed = parse(body).getOrElse(Json.Null)
-    HttpRequest[IO](Method.POST, org.http4s.Uri.unsafeFromString(s"/$path")).withEntity(parsed)
+    HttpRequest[IO](Method.POST, org.http4s.Uri.unsafeFromString(s"/$path"))
+      .withEntity(body)
+      .withContentType(`Content-Type`(MediaType.application.json))
 
   private val cancel = """{"createdAt": 1700000000000, "key": "k"}"""
 
@@ -72,6 +76,10 @@ class EdgeApiSuite extends CatsEffectSuite with munit.ScalaCheckSuite:
       "cancel" -> """{"createdAt": -5, "key": "k"}""",
       "capture" -> """{"createdAt": 1700000000000, "key": "k", "amount": "0"}""",
       "capture" -> """{"createdAt": 1700000000000, "key": "k", "amount": "nine"}""",
+      // A lone surrogate, which JSON can escape but no Unicode text holds: its key would share an ID with "x?".
+      "cancel" -> "{\"createdAt\": 1700000000000, \"key\": \"x\\ud800\"}",
+      // One byte past what the command log can write for a key.
+      "cancel" -> s"""{"createdAt": 1700000000000, "key": "${"x" * (ClientKey.MaxBodyBytes + 1)}"}""",
     )
     val app = EdgeApi.routes((_: Request) => IO.raiseError(AssertionError("reached the machine"))).orNotFound
     bad.traverse_((path, body) => app.run(post(path, body)).map(r => assertEquals(r.status, Status.BadRequest, s"$path $body")))

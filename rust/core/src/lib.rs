@@ -9,12 +9,8 @@
 //!   socket or a thread, nor iterate a randomly seeded hash map, even through a dependency.
 //! - Amounts and IDs are native `u128`, and an overflow stops the program in every build profile.
 //!
-//! Known differences from the Scala core, none of which a correct caller meets:
-//!
-//! - A Rust string is always valid Unicode, so a client key whose body holds a lone UTF-16 surrogate, which a Java
-//!   string can hold, cannot exist here. The record codec rejects such a body.
-//! - Violations of the invariants come out in a fixed order and their detail text differs; compare them by
-//!   property.
+//! One known difference from the Scala core: violations of the invariants come out in a fixed order and their detail
+//! text differs, so compare them by property.
 
 #![cfg_attr(not(test), no_std)]
 

@@ -4,7 +4,7 @@ mod common;
 
 use common::*;
 use ledger_core::*;
-use ledger_core::{ids, partitioner};
+use ledger_core::{ids, partitioner, record_codec};
 use proptest::prelude::*;
 
 // Fixed test vectors, the Scala core's own, computed independently of either core from the layout in README section
@@ -41,6 +41,21 @@ fn a_keys_time_must_keep_ids_away_from_0_and_the_maximum_value() {
     assert!(ClientKey::try_new(WallTime::new(ClientKey::MAX_TIME + 1), "k").is_err());
     assert!(ClientKey::try_new(WallTime::new(ClientKey::MIN_TIME), "k").is_ok());
     assert!(ClientKey::try_new(WallTime::new(ClientKey::MAX_TIME), "k").is_ok());
+}
+
+#[test]
+fn a_keys_body_must_fit_what_the_command_log_can_write_for_it() {
+    let t = WallTime::new(1_700_000_000_000);
+    let longest = ClientKey::try_new(t, "x".repeat(ClientKey::MAX_BODY_BYTES));
+    assert!(longest.is_ok());
+    let _ = record_codec::encode(&Record::Command(Command::Cancel(longest.unwrap())));
+    assert!(ClientKey::try_new(t, "x".repeat(ClientKey::MAX_BODY_BYTES + 1)).is_err());
+    // NUL takes two bytes and every other character here three, as `writeUTF` writes them.
+    assert!(ClientKey::try_new(t, "\0".repeat(ClientKey::MAX_BODY_BYTES / 2 + 1)).is_err());
+    assert!(ClientKey::try_new(t, "€".repeat(ClientKey::MAX_BODY_BYTES / 3 + 1)).is_err());
+    assert!(ClientKey::try_new(t, "€".repeat(ClientKey::MAX_BODY_BYTES / 3)).is_ok());
+    // A character outside the Basic Multilingual Plane is two UTF-16 units, three bytes each.
+    assert!(ClientKey::try_new(t, "😀".repeat(ClientKey::MAX_BODY_BYTES / 6 + 1)).is_err());
 }
 
 fn earlier_and_later() -> impl Strategy<Value = (ClientKey, ClientKey)> {
