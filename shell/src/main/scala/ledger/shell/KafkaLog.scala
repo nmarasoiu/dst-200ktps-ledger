@@ -1,6 +1,6 @@
 package ledger.shell
 
-import cats.effect.{IO, Ref, Resource}
+import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.syntax.all.*
 import fs2.Stream
 import fs2.kafka.*
@@ -73,11 +73,19 @@ object KafkaLog:
 
   private final class Reader(cfg: Config, consumer: KafkaConsumer[IO, Array[Byte], Array[Byte]]) extends LogReader:
 
+    /** Each partition's stream runs on its own fiber. A partition revoked and given back to this member gets a new
+      * stream, which waits until the old one has ended: otherwise its assignment could be told before the old
+      * revocation, and the resolver would drop the partition it was just given.
+      */
     def deliveries: Stream[IO, Delivery] =
-      consumer.partitionsMapStream
-        .flatMap(assigned => Stream.emits(assigned.toVector.sortBy(_._1.partition)))
-        .map((tp, records) => ofPartition(tp, records))
-        .parJoinUnbounded
+      Stream.eval(Ref[IO].of(Map.empty[TopicPartition, Deferred[IO, Unit]])).flatMap: ended =>
+        consumer.partitionsMapStream
+          .flatMap(assigned => Stream.emits(assigned.toVector.sortBy(_._1.partition)))
+          .evalMap: (tp, records) =>
+            Deferred[IO, Unit].flatMap: done =>
+              ended.modify(all => (all.updated(tp, done), all.get(tp))).map: before =>
+                (Stream.exec(before.traverse_(_.get)) ++ ofPartition(tp, records)).onFinalize(done.complete(()).void)
+          .parJoinUnbounded
 
     private type Rec = CommittableConsumerRecord[IO, Array[Byte], Array[Byte]]
 
